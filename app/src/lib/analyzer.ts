@@ -302,7 +302,7 @@ function computeRelevance(p: ParsedProspectus): RelevanceProfile {
   // / manufacturing / distribution. Mass consumer/retail/healthcare serve many
   // end customers and do not report a "top-5 customers" share.
   const massConsumer =
-    /retail|mini[- ]?market|convenience store|grocery|hospital|healthcare|medical centre|clinic|restaurant|consumer|f&b|e-commerce|education|tuition/.test(
+    /retail|mini[- ]?market|convenience store|grocery|hospital|healthcare|medical centre|clinic|restaurant|consumer|f&b|e-commerce|education|tuition|vending|massage|leisure|wellness|spa|fitness|gym|entertainment|rental plan|hospitality/.test(
       text,
     );
   const concentrationLikely =
