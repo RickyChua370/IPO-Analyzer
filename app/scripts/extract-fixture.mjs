@@ -18,12 +18,14 @@ const OUT_DIR = join(__dirname, '..', 'fixtures');
 
 const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
 
+// Only the SLGC prospectus parts. The repo root may hold several companies'
+// PDFs; each has its own extract script writing its own fixture.
 const pdfFiles = readdirSync(REPO_ROOT)
-  .filter((f) => f.toLowerCase().endsWith('.pdf'))
+  .filter((f) => /^SLGC Berhad .*\.pdf$/i.test(f))
   .sort();
 
 if (pdfFiles.length === 0) {
-  console.error('No PDFs found in', REPO_ROOT);
+  console.error('No SLGC prospectus PDFs found in', REPO_ROOT);
   process.exit(1);
 }
 
