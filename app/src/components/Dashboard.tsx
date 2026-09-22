@@ -21,7 +21,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { Analysis, Flag, ParsedProspectus } from '../lib/types.ts';
+import type { Analysis, Flag, ParsedProspectus, RelevanceProfile } from '../lib/types.ts';
 import { Term } from './Term.tsx';
 import { Editable } from './Editable.tsx';
 import {
@@ -70,7 +70,13 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
   const { parsed: p, metrics: m } = analysis;
 
   const countdown = fmtCountdown(m.daysUntilClose);
-  const flagCounts = m.flags.reduce<Record<string, number>>((acc, f) => {
+
+  // Signals that do not apply to this business are hidden from the grid so the
+  // report does not look like a failed extraction; they are still acknowledged
+  // in a small footnote for transparency.
+  const shownFlags = m.flags.filter((f) => f.applicability !== 'not_applicable');
+  const naFlags = m.flags.filter((f) => f.applicability === 'not_applicable');
+  const flagCounts = shownFlags.reduce<Record<string, number>>((acc, f) => {
     acc[f.level] = (acc[f.level] ?? 0) + 1;
     return acc;
   }, {});
@@ -175,17 +181,28 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
             unit="times"
           />
           <Kpi label="Price-to-book" glossary="priceToBook" value={fmtTimes(m.priceToBook, 1)} derived />
-          <Kpi
-            label="Order book"
-            glossary="orderBook"
-            value={fmtRM(p.orderBook.value, { compact: true })}
-            raw={p.orderBook.value}
-            path="orderBook"
-            onEdit={onEdit}
-            edited={p.orderBook.edited}
-            unit="RM"
-          />
-          <Kpi label="Revenue visibility" glossary="orderBookCoverage" value={fmtYears(m.orderBookCoverage)} derived />
+          {m.relevance.orderBook !== 'not_applicable' ? (
+            <>
+              <Kpi
+                label="Order book"
+                glossary="orderBook"
+                value={fmtRM(p.orderBook.value, { compact: true })}
+                raw={p.orderBook.value}
+                path="orderBook"
+                onEdit={onEdit}
+                edited={p.orderBook.edited}
+                unit="RM"
+              />
+              <Kpi label="Revenue visibility" glossary="orderBookCoverage" value={fmtYears(m.orderBookCoverage)} derived />
+            </>
+          ) : (
+            // Order book is meaningless for this business; show two universally
+            // relevant headline metrics instead so the strip stays useful.
+            <>
+              <Kpi label="Founder stake" glossary="founderRetained" value={fmtPct(m.founderRetainedPct)} derived />
+              <Kpi label="Revenue CAGR" glossary="cagr" value={fmtPct(m.revenueCagr)} derived />
+            </>
+          )}
         </div>
 
         {/* Flags */}
@@ -202,10 +219,16 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
             )}
           </div>
           <div className="flags__grid">
-            {m.flags.map((f) => (
+            {shownFlags.map((f) => (
               <FlagCard key={f.id} flag={f} />
             ))}
           </div>
+          {naFlags.length > 0 && (
+            <p className="flags__na">
+              Not shown ({naFlags.length}) — not applicable to this type of business:{' '}
+              {naFlags.map((f) => f.label).join(', ')}.
+            </p>
+          )}
         </div>
 
         {/* The deal + money split */}
@@ -388,12 +411,14 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                       : DASH}
                   </td>
                 </tr>
-                <tr>
-                  <th>
-                    <Term k="customerConcentration">Top-5 customers</Term>
-                  </th>
-                  <td>{fmtPct(m.topCustomerConcentration)} of revenue</td>
-                </tr>
+                {m.relevance.customerConcentration !== 'not_applicable' && (
+                  <tr>
+                    <th>
+                      <Term k="customerConcentration">Top-5 customers</Term>
+                    </th>
+                    <td>{fmtPct(m.topCustomerConcentration)} of revenue</td>
+                  </tr>
+                )}
                 <tr>
                   <th>
                     <Term k="employees">Employees</Term>
@@ -747,7 +772,7 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
           </div>
         </div>
 
-        <ParseAudit parsed={p} />
+        <ParseAudit parsed={p} relevance={m.relevance} />
 
         <footer className="foot">
           This report was generated locally from the prospectus PDFs. Figures are extracted
@@ -884,12 +909,32 @@ function FinRow({
  * the user can fill the gap in and knows exactly how much of the report is
  * document-derived.
  */
-function ParseAudit({ parsed }: { parsed: ParsedProspectus }) {
+function ParseAudit({
+  parsed,
+  relevance,
+}: {
+  parsed: ParsedProspectus;
+  relevance: RelevanceProfile;
+}) {
   const scalars = Object.entries(parsed).filter(
     ([, v]) => v && typeof v === 'object' && 'confidence' in v,
   ) as [string, { value: unknown; confidence: string; page?: number; edited?: boolean }][];
 
-  const missingList = scalars.filter(([, v]) => v.value === null).map(([k]) => k);
+  // Fields that are empty only because they do not apply to this business are
+  // reported separately (and calmly) rather than as extraction failures.
+  const naKeys = new Set<string>();
+  if (relevance.orderBook === 'not_applicable') {
+    naKeys.add('orderBook');
+    naKeys.add('orderBookRaw');
+  }
+  if (relevance.customerConcentration === 'not_applicable') {
+    naKeys.add('customerConcentration');
+  }
+
+  const missingList = scalars
+    .filter(([k, v]) => v.value === null && !naKeys.has(k))
+    .map(([k]) => k);
+  const naList = scalars.filter(([k, v]) => v.value === null && naKeys.has(k)).map(([k]) => k);
   const lowConfidence = scalars
     .filter(([, v]) => v.value !== null && (v.confidence === 'low' || v.confidence === 'medium'))
     .map(([k]) => k);
@@ -926,13 +971,16 @@ function ParseAudit({ parsed }: { parsed: ParsedProspectus }) {
   };
   const name = (k: string) => LABELS[k] ?? k;
 
-  const found = scalars.length - missingList.length;
+  // Exclude not-applicable fields from the coverage denominator so the score
+  // reflects only what the parser was actually expected to find.
+  const applicableCount = scalars.length - naList.length;
+  const found = applicableCount - missingList.length;
 
   return (
     <div className="audit">
       <h3 className="h3">Extraction audit</h3>
       <p className="audit__summary">
-        Found <strong>{found}</strong> of {scalars.length} headline fields,{' '}
+        Found <strong>{found}</strong> of {applicableCount} applicable headline fields,{' '}
         <strong>{parsed.periods.length}</strong> financial periods,{' '}
         <strong>{parsed.proceedsUses.length}</strong> proceeds line items and{' '}
         <strong>{parsed.allocations.length}</strong> allocation rows.
@@ -943,6 +991,13 @@ function ParseAudit({ parsed }: { parsed: ParsedProspectus }) {
           {missingList.map(name).join(', ')}. Click the matching{' '}
           <span className="editable editable--missing editable--demo">add</span> control on the
           report to enter these manually.
+        </p>
+      )}
+      {naList.length > 0 && (
+        <p className="audit__line">
+          <span className="audit__tag audit__tag--na">Not applicable</span>{' '}
+          {naList.map(name).join(', ')} — not relevant to this type of business, so omitted from the
+          report rather than missed.
         </p>
       )}
       {lowConfidence.length > 0 && (

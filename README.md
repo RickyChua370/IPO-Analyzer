@@ -58,6 +58,8 @@ Both pages are print-optimised: **Print / Save as PDF** yields a genuine two-pag
 
 **Part-year periods are never silently compared to full years.** An FPE stub period is labelled and excluded from CAGR and growth calculations.
 
+**The report adapts to the business — but never hides a real gap.** Sector-specific metrics (order book / revenue visibility, customer concentration) are shown only when they apply. A hospital or a grocery chain has no order book, so those cards are omitted and noted as "not applicable" rather than displayed as failed extractions. The safeguard: a metric is treated as not-applicable purely from the *business type*, never because it happens to be empty. A construction firm with a missing order book is still surfaced as a genuine gap to fill, not quietly dropped — so tidying the report can never mask a real extraction miss.
+
 **No score, no verdict.** Flags state the rule that produced them so you can disagree with the threshold. There is no composite rating, because compressing a prospectus into one number hides exactly what matters.
 
 ---

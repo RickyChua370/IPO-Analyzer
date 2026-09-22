@@ -160,5 +160,81 @@ check('no "undefined" leaks into markup', !wipedHtml.includes('undefined'));
 check('missing values offer an add control', wipedHtml.includes('editable--missing'));
 check('missing values reported in audit', wipedHtml.includes('Not found'));
 
+// --- Sector-aware relevance ------------------------------------------------
+// SLGC is a construction group: order book applies and is present, so it must
+// be shown as a normal metric (not hidden, not "not applicable").
+check(
+  'construction: order book is present',
+  analysis.metrics.relevance.orderBook === 'present',
+  analysis.metrics.relevance.orderBook,
+);
+check(
+  'construction: order book flag shown, not N/A',
+  analysis.metrics.flags.find((f) => f.id === 'orderBook')?.applicability === 'present',
+);
+check('construction: report shows Revenue visibility', html.includes('Revenue visibility'));
+
+// A hospital-style business (no order book, mass-consumer patients): both
+// order book and customer concentration should be flagged not-applicable and
+// hidden from the grid — without being reported as extraction failures.
+const hospital = structuredClone(parsed);
+hospital.businessDescription = {
+  value: 'operation of private hospitals and medical centres providing healthcare services to patients',
+  confidence: 'high',
+};
+hospital.industry = { value: 'Healthcare', confidence: 'medium' };
+hospital.orderBook = { value: null, confidence: 'missing' };
+hospital.orderBookRaw = { value: null, confidence: 'missing' };
+hospital.customerConcentration = { value: null, confidence: 'missing' };
+const hospitalMetrics = analyse(hospital);
+check(
+  'healthcare: order book is not_applicable',
+  hospitalMetrics.relevance.orderBook === 'not_applicable',
+  hospitalMetrics.relevance.orderBook,
+);
+check(
+  'healthcare: customer concentration is not_applicable',
+  hospitalMetrics.relevance.customerConcentration === 'not_applicable',
+  hospitalMetrics.relevance.customerConcentration,
+);
+const hospitalHtml = renderToStaticMarkup(
+  <Dashboard
+    analysis={{ parsed: hospital, metrics: hospitalMetrics }}
+    onEdit={() => {}}
+    onSave={() => {}}
+    saved={false}
+  />,
+);
+check(
+  'healthcare: N/A signals summarised, not shown as found-gaps',
+  hospitalHtml.includes('not applicable to this type of business') ||
+    hospitalHtml.includes('Not applicable'),
+);
+check(
+  'healthcare: order book absent from extraction "Not found" list',
+  !/Not found[^.]*Order book/.test(hospitalHtml),
+);
+check(
+  'healthcare: substitute KPI (Founder stake) replaces the order-book KPI',
+  hospitalHtml.includes('Founder stake'),
+);
+// "Revenue visibility" may still appear once, in the N/A footnote listing what
+// was hidden — but it must not appear as a live KPI ("calculated" caption).
+check(
+  'healthcare: Revenue visibility not shown as a KPI',
+  !/Revenue visibility<\/[^>]+><[^>]*class="kpi__value"/.test(hospitalHtml) &&
+    (hospitalHtml.match(/Revenue visibility/g) ?? []).length <= 1,
+);
+
+// A construction firm that genuinely lacks an order book value must still be
+// treated as a gap ('missed'), never silently hidden.
+const noOb = applyEdit(parsed, 'orderBook', null);
+const noObMetrics = analyse(noOb);
+check(
+  'construction with empty order book stays "missed" (visible gap)',
+  noObMetrics.relevance.orderBook === 'missed',
+  noObMetrics.relevance.orderBook,
+);
+
 console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
 process.exit(fail > 0 ? 1 : 0);

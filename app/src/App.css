@@ -918,6 +918,20 @@ body {
   color: var(--good);
 }
 
+.audit__tag--na {
+  background: var(--bg);
+  color: var(--ink-faint);
+  border: 1px dashed var(--line);
+}
+
+/* Footnote under the signals grid listing hidden not-applicable signals. */
+.flags__na {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
 /* ---------- Footer ---------- */
 .foot {
   margin-top: 16px;

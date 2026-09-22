@@ -11,10 +11,12 @@
  */
 
 import type {
+  Applicability,
   DerivedMetrics,
   Flag,
   FinancialPeriod,
   ParsedProspectus,
+  RelevanceProfile,
   Shareholder,
 } from './types.ts';
 
@@ -258,6 +260,7 @@ export function analyse(p: ParsedProspectus, now: Date = new Date()): DerivedMet
     independentDirectorRatio,
     daysUntilClose,
     flags: [],
+    relevance: computeRelevance(p),
   };
 
   metrics.flags = buildFlags(p, metrics);
@@ -265,28 +268,100 @@ export function analyse(p: ParsedProspectus, now: Date = new Date()): DerivedMet
 }
 
 // ---------------------------------------------------------------------------
+// Relevance: which sector-specific metrics apply to this business
+// ---------------------------------------------------------------------------
+
+/**
+ * Decides whether the sector-specific metrics (order book, customer
+ * concentration) apply to this company.
+ *
+ * Design rule — a metric is 'not_applicable' only because of the *business
+ * type*, never merely because it is empty:
+ *   - If the value was found, it is 'present' (always shown).
+ *   - Else if the business is one where the metric is a normal disclosure
+ *     (project/contract work for order book; concentrated B2B for customers)
+ *     but it is empty, it is 'missed' (kept visible as a real gap).
+ *   - Else the metric does not belong to this business, so 'not_applicable'
+ *     (safe to hide).
+ *
+ * Detection leans on the parsed business description and the whole-document
+ * signal already captured, so it is conservative: when unsure, it errs toward
+ * 'missed' (keep visible) rather than hiding something that might be real.
+ */
+function computeRelevance(p: ParsedProspectus): RelevanceProfile {
+  const text = `${p.businessDescription.value ?? ''} ${p.industry.value ?? ''}`.toLowerCase();
+
+  // Businesses whose revenue is contract/project-based and therefore normally
+  // report an order book / unbilled contract value.
+  const projectBased =
+    /construction|contractor|engineering|epcc|epc\b|fabrication|infrastructure|building works|civil works|shipbuild|turnkey|design and build|oil and gas|marine|property develop|order book|unbilled/.test(
+      text,
+    );
+
+  // Businesses that typically disclose customer concentration are B2B / project
+  // / manufacturing / distribution. Mass consumer/retail/healthcare serve many
+  // end customers and do not report a "top-5 customers" share.
+  const massConsumer =
+    /retail|mini[- ]?market|convenience store|grocery|hospital|healthcare|medical centre|clinic|restaurant|consumer|f&b|e-commerce|education|tuition/.test(
+      text,
+    );
+  const concentrationLikely =
+    projectBased ||
+    /manufactur|fabricat|distribut|wholesale|supply|b2b|original equipment|oem|contract/.test(text);
+
+  const relevance: RelevanceProfile = {
+    orderBook: p.orderBook.value !== null
+      ? 'present'
+      : projectBased
+        ? 'missed'
+        : 'not_applicable',
+    customerConcentration: (p.customerConcentration.value?.length ?? 0) > 0
+      ? 'present'
+      : concentrationLikely && !massConsumer
+        ? 'missed'
+        : 'not_applicable',
+  };
+  return relevance;
+}
+
+// ---------------------------------------------------------------------------
 // Flag rules
 // ---------------------------------------------------------------------------
 
 const UNKNOWN = 'Not found in prospectus';
+const NOT_APPLICABLE = 'Not applicable to this type of business';
 
 function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
   const flags: Flag[] = [];
   const add = (f: Flag) => flags.push(f);
 
-  // Customer concentration
+  // Applicability for a universal signal: present when found, else a genuine
+  // gap ('missed'). Universal signals are never 'not_applicable'.
+  const univ = (found: boolean): Applicability => (found ? 'present' : 'missed');
+
+  // Customer concentration (sector-specific applicability)
   {
     const v = m.topCustomerConcentration;
+    const applicability =
+      v !== null ? 'present' : m.relevance.customerConcentration;
     add({
       id: 'concentration',
       label: 'Customer concentration',
       glossaryKey: 'customerConcentration',
-      display: v === null ? '—' : `Top 5 = ${v.toFixed(1)}% of revenue`,
+      applicability,
+      display:
+        v !== null
+          ? `Top 5 = ${v.toFixed(1)}% of revenue`
+          : applicability === 'not_applicable'
+            ? 'n/a for this business'
+            : '—',
       level: v === null ? 'unknown' : v > 70 ? 'concern' : v >= 40 ? 'watch' : 'good',
       rule:
-        v === null
-          ? UNKNOWN
-          : 'Concern above 70%, watch 40–70%, good below 40% of revenue from the top 5 customers',
+        v !== null
+          ? 'Concern above 70%, watch 40–70%, good below 40% of revenue from the top 5 customers'
+          : applicability === 'not_applicable'
+            ? NOT_APPLICABLE
+            : UNKNOWN,
     });
   }
 
@@ -298,6 +373,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'gearing',
       label: `Gearing${isAfter ? ' (post-IPO)' : ''}`,
       glossaryKey: 'gearing',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(2)}×`,
       level: v === null ? 'unknown' : v > 2 ? 'concern' : v >= 1 ? 'watch' : 'good',
       rule:
@@ -312,6 +388,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'currentRatio',
       label: 'Current ratio',
       glossaryKey: 'currentRatio',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(2)}×`,
       level: v === null ? 'unknown' : v < 1 ? 'concern' : v < 1.2 ? 'watch' : 'good',
       rule: v === null ? UNKNOWN : 'Concern below 1.0×, watch 1.0–1.2×, good above 1.2×',
@@ -334,6 +411,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'marginTrend',
       label: 'Gross margin trend',
       glossaryKey: 'marginTrend',
+      applicability: univ(t !== null),
       display:
         t === null ? '—' : `${t}${chg !== null ? ` (${chg >= 0 ? '+' : ''}${chg.toFixed(1)} pp)` : ''}`,
       level,
@@ -344,19 +422,28 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
     });
   }
 
-  // Order book coverage
+  // Order book coverage (sector-specific applicability)
   {
     const v = m.orderBookCoverage;
+    const applicability = v !== null ? 'present' : m.relevance.orderBook;
     add({
       id: 'orderBook',
       label: 'Revenue visibility',
       glossaryKey: 'orderBookCoverage',
-      display: v === null ? '—' : `${v.toFixed(1)} years secured`,
+      applicability,
+      display:
+        v !== null
+          ? `${v.toFixed(1)} years secured`
+          : applicability === 'not_applicable'
+            ? 'n/a for this business'
+            : '—',
       level: v === null ? 'unknown' : v >= 2 ? 'good' : v >= 1 ? 'watch' : 'concern',
       rule:
-        v === null
-          ? UNKNOWN
-          : 'Good above 2 years of order book coverage, watch 1–2 years, concern below 1 year',
+        v !== null
+          ? 'Good above 2 years of order book coverage, watch 1–2 years, concern below 1 year'
+          : applicability === 'not_applicable'
+            ? NOT_APPLICABLE
+            : UNKNOWN,
     });
   }
 
@@ -367,6 +454,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'profitTrend',
       label: 'Latest-year profit',
       glossaryKey: 'pat',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}% YoY`,
       level: v === null ? 'unknown' : v >= 0 ? 'good' : 'watch',
       rule: v === null ? UNKNOWN : 'Watch if profit fell in the most recent full financial year',
@@ -380,6 +468,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'proceedsGrowth',
       label: 'Proceeds to growth',
       glossaryKey: 'proceedsToGrowth',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(1)}% of raise`,
       level: v === null ? 'unknown' : v >= 50 ? 'good' : 'watch',
       rule:
@@ -396,6 +485,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'vendorCashOut',
       label: 'Vendor cash-out',
       glossaryKey: 'vendorCashOut',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(1)}% to existing owners`,
       level: v === null ? 'unknown' : v > 50 ? 'concern' : v > 30 ? 'watch' : 'good',
       rule:
@@ -412,6 +502,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'dividend',
       label: 'Dividend policy',
       glossaryKey: 'dividendPolicy',
+      applicability: univ(formal !== null),
       display:
         formal === null ? '—' : formal ? (p.dividendPolicy.value ?? 'Formal policy') : 'None formal',
       level: formal === null ? 'unknown' : formal ? 'good' : 'watch',
@@ -429,6 +520,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'founderStake',
       label: 'Founder retained stake',
       glossaryKey: 'founderRetained',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(1)}% after IPO`,
       level: v === null ? 'unknown' : v >= 50 ? 'good' : v >= 30 ? 'watch' : 'concern',
       rule:
@@ -445,6 +537,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'boardIndependence',
       label: 'Board independence',
       glossaryKey: 'independentDirector',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(0)}% independent`,
       level: v === null ? 'unknown' : v >= 50 ? 'good' : v >= 33.3 ? 'watch' : 'concern',
       rule:
@@ -461,6 +554,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'valuation',
       label: 'PE multiple',
       glossaryKey: 'peMultiple',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(1)}×`,
       level: v === null ? 'unknown' : v > 25 ? 'watch' : 'good',
       rule:
@@ -477,6 +571,7 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
       id: 'retailAccess',
       label: 'Retail ballot pool',
       glossaryKey: 'retailBallotPct',
+      applicability: univ(v !== null),
       display: v === null ? '—' : `${v.toFixed(2)}% of company`,
       level: v === null ? 'unknown' : v >= 5 ? 'good' : 'watch',
       rule:
