@@ -244,6 +244,22 @@ export interface ParsedProspectus {
 
 export type FlagLevel = 'good' | 'watch' | 'concern' | 'unknown';
 
+/**
+ * Why a value is empty — the distinction that drives what the UI does with it.
+ *
+ *  - 'present'         the value was found; show it normally.
+ *  - 'missed'          the value applies to this business but the parser did
+ *                      not find it; must stay visible as a genuine gap.
+ *  - 'not_applicable'  the metric does not exist for this kind of business
+ *                      (e.g. order book for a hospital); safe to hide so the
+ *                      report does not look like a failed extraction.
+ *
+ * The rule: a field is only ever 'not_applicable' by virtue of the business
+ * type, never merely because it is empty. An applicable-but-empty field is
+ * always 'missed', so we never hide a real extraction failure.
+ */
+export type Applicability = 'present' | 'missed' | 'not_applicable';
+
 export interface Flag {
   id: string;
   label: string;
@@ -254,6 +270,8 @@ export interface Flag {
   rule: string;
   /** Glossary key for the hover explainer. */
   glossaryKey?: string;
+  /** Whether this signal applies to the company's business (see Applicability). */
+  applicability: Applicability;
 }
 
 export interface DerivedMetrics {
@@ -307,6 +325,22 @@ export interface DerivedMetrics {
   daysUntilClose: number | null;
 
   flags: Flag[];
+
+  /** Which optional metrics apply to this company's business (see analyzer). */
+  relevance: RelevanceProfile;
+}
+
+/**
+ * Records, per optional metric, whether it is relevant to this company's
+ * business. Metrics that are common to all IPOs (price, profit, gearing, …)
+ * are not listed here — only the ones that are sector-specific and therefore
+ * candidates for hiding when not applicable.
+ */
+export interface RelevanceProfile {
+  /** Order book / revenue visibility — only project/contract businesses. */
+  orderBook: Applicability;
+  /** Customer concentration — only where the prospectus discloses it. */
+  customerConcentration: Applicability;
 }
 
 export interface Analysis {
