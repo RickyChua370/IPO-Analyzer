@@ -116,13 +116,25 @@ function findProse(idx: DocIndex, re: RegExp): { match: RegExpMatchArray; page: 
 
 function parseCompanyName(idx: DocIndex): Field<string> {
   // The cover/notice page names the company followed by BERHAD, often with an
-  // abbreviation in quotes: 'SLGC BERHAD ("SLGC" OR THE "COMPANY")'
+  // abbreviation in quotes: 'SLGC BERHAD ("SLGC" OR THE "COMPANY")'. The name
+  // frequently wraps across a line break, so match against the newline-
+  // flattened text and allow the name to span it.
   const hit = findProse(
     idx,
-    /(?:ELECTRONIC\s+)?PROSPECTUS\s+OF\s+([A-Z][A-Z0-9\s&.'-]{2,60}?\s+BERHAD)\b/i,
+    // The name may begin with a digit ("99 SPEED MART ...") and wrap a line.
+    /(?:ELECTRONIC\s+)?PROSPECTUS\s+OF\s+([A-Z0-9][A-Z0-9\s&.'-]{2,80}?\s+BERHAD)\b/i,
   );
   if (hit) {
     return field(tidyName(hit.match[1]), { page: hit.page, raw: hit.match[0] });
+  }
+
+  // "...OF UP TO n ORDINARY SHARES IN <NAME> BERHAD" (offer-summary phrasing).
+  const inShares = findProse(
+    idx,
+    /ORDINARY\s+SHARES\s+IN\s+([A-Z0-9][A-Z0-9\s&.'-]{2,80}?\s+BERHAD)\b/i,
+  );
+  if (inShares) {
+    return field(tidyName(inShares.match[1]), { page: inShares.page, confidence: 'medium' });
   }
 
   // Fallback: first standalone all-caps line ending in BERHAD.
@@ -148,7 +160,13 @@ function tidyName(s: string): string {
     .trim()
     .split(' ')
     .map((word) => {
-      if (/^[A-Z0-9&.-]{2,5}$/.test(word)) return word; // acronym, e.g. SLGC, YTL, MBSB
+      if (/^\d+$/.test(word)) return word; // numeric token, e.g. "99"
+      // Preserve acronyms/initialisms: all-caps tokens that are either very
+      // short or vowel-less (SLGC, YTL, MBSB, DKSH, KPJ). Title-case ordinary
+      // words that merely appear in full caps on the cover ("SPEED", "MART").
+      const isAcronym =
+        /^[A-Z][A-Z0-9&.-]{1,4}$/.test(word) && (word.length <= 3 || !/[AEIOU]/.test(word));
+      if (isAcronym) return word;
       return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
     })
     .join(' ');
@@ -241,6 +259,10 @@ function parseIpoPrice(idx: DocIndex): Field<number> {
     /IPO\s+Price\s+of\s+RM\s?([\d.]+)/i,
     /at\s+our\s+IPO\s+Price\s+of\s+RM\s?([\d.]+)/i,
     /issue\s+price\s+of\s+RM\s?([\d.]+)\s+per\s+(?:share|unit)/i,
+    // Main Market book-built IPOs quote a "Retail Price" / "Final Retail Price".
+    /(?:Final\s+)?Retail\s+Price\s*\(RM\)\s*([\d.]+)/i,
+    /(?:Final\s+)?Retail\s+Price\s+of\s+RM\s?([\d.]+)/i,
+    /Institutional\s+Price\s+of\s+RM\s?([\d.]+)/i,
   ];
   for (const re of patterns) {
     const hit = findProse(idx, re);
@@ -271,11 +293,28 @@ function parseEnlargedShares(idx: DocIndex): Field<number> {
     /Enlarged\s+(?:number\s+of\s+Shares|share\s+capital)\s+upon\s+Listing\s+([\d,]{7,})/i,
     /enlarged\s+(?:number\s+of\s+)?share\s+capital\s+of\s+([\d,]{7,})\s+Shares/i,
     /enlarged\s+issued\s+share\s+capital\s+of\s+([\d,]{7,})/i,
+    // Main Market phrasing: "enlarged issued Shares of 8,400,000,000 ... upon our Listing"
+    /enlarged\s+(?:number\s+of\s+)?issued\s+Shares\s+of\s+([\d,]{7,})\s+(?:Shares\s+)?upon\s+(?:our\s+)?Listing/i,
+    /enlarged\s+issued\s+Shares\s+of\s+([\d,]{7,})/i,
   ];
+  // Collect all matches and take the most common value: the enlarged count is
+  // repeated many times in footnotes, so the mode is robust against a stray
+  // pre-Subdivision or Over-allotment figure.
+  const counts = new Map<number, { n: number; page?: number; raw: string }>();
   for (const re of patterns) {
-    const hit = findProse(idx, re);
-    const v = toNumber(hit?.match[1]);
-    if (hit && v !== null && v > 1000) return field(v, { page: hit.page, raw: hit.match[0] });
+    for (const line of idx.lines) {
+      const m = line.match(re);
+      const v = toNumber(m?.[1]);
+      if (m && v !== null && v > 1_000_000) {
+        const e = counts.get(v);
+        if (e) e.n++;
+        else counts.set(v, { n: 1, raw: m[0] });
+      }
+    }
+  }
+  if (counts.size > 0) {
+    const [value, meta] = [...counts.entries()].sort((a, b) => b[1].n - a[1].n)[0];
+    return field(value, { raw: meta.raw });
   }
   return missing<number>();
 }
@@ -369,11 +408,11 @@ function parseAllocations(idx: DocIndex): {
   // Cross-check against the prose statements, which are often clearer.
   const piProse = findProse(
     idx,
-    /gross\s+proceeds\s+(?:to\s+be\s+raised\s+)?(?:by\s+our\s+Company\s+)?from\s+the\s+Public\s+Issue\s+of\s+RM\s?([\d.]+)\s*(million|billion)?/i,
+    /gross\s+proceeds\s+(?:to\s+be\s+raised\s+)?(?:by\s+our\s+Company\s+)?from\s+(?:the\s+|our\s+)?Public\s+Issue\s+(?:of\s+|amounting\s+to\s+)(?:up\s+to\s+)?(?:approximately\s+)?RM\s?([\d.]+)\s*(million|billion)?/i,
   );
   const ofsProse = findProse(
     idx,
-    /gross\s+proceeds\s+from\s+the\s+Offer\s+for\s+Sale\s+of\s+approximately\s+RM\s?([\d.]+)\s*(million|billion)?/i,
+    /gross\s+proceeds\s+from\s+(?:the\s+|our\s+)?Offer\s+for\s+Sale\s+(?:of\s+)?(?:up\s+to\s+)?(?:approximately\s+)?RM\s?([\d.]+)\s*(million|billion)?/i,
   );
 
   const scale = (n: number | null, unit: string | undefined) => {
@@ -386,14 +425,19 @@ function parseAllocations(idx: DocIndex): {
   const piProseRM = scale(toNumber(piProse?.match[1]), piProse?.match[2]);
   const ofsProseRM = scale(toNumber(ofsProse?.match[1]), ofsProse?.match[2]);
 
-  const issueSharesProse = findProse(
-    idx,
-    /A\s+total\s+of\s+([\d,]{7,})\s+Issue\s+Shares,\s+representing/i,
-  );
-  const ofsSharesProse = findProse(
-    idx,
-    /([\d,]{7,})\s+Offer\s+Shares,\s+representing/i,
-  );
+  // Share counts: SLGC states "A total of N Issue Shares"; 99SM defines them as
+  // "Public issue of N Issue Shares" / "The N new Shares to be issued".
+  const issueSharesProse =
+    findProse(idx, /A\s+total\s+of\s+([\d,]{7,})\s+Issue\s+Shares,\s+representing/i) ??
+    findProse(idx, /Public\s+[Ii]ssue\s+of\s+([\d,]{7,})\s+(?:Issue\s+)?(?:new\s+)?Shares/i) ??
+    findProse(idx, /\bThe\s+([\d,]{7,})\s+new\s+Shares\s+to\s+be\s+issued/i);
+  // Prefer the authoritative "Offer for Sale of up to N ... Shares" definition
+  // over a "N Offer Shares, representing ..." line, which is usually a smaller
+  // sub-tranche (e.g. the retail clawback portion) rather than the OFS total.
+  const ofsSharesProse =
+    findProse(idx, /Offer\s+for\s+[Ss]ale\s+of\s+(?:up\s+to\s+)?([\d,]{7,})\s+(?:existing\s+|Offer\s+)?[Ss]hares/i) ??
+    findProse(idx, /COMPRISING\s+AN\s+OFFER\s+FOR\s+SALE\s+OF\s+(?:UP\s+TO\s+)?([\d,]{7,})/i) ??
+    findProse(idx, /([\d,]{7,})\s+Offer\s+Shares,\s+representing/i);
 
   return {
     allocations,
@@ -422,11 +466,12 @@ function parseAllocations(idx: DocIndex): {
 
 function classifyProceeds(label: string): ProceedsUse['category'] {
   const l = label.toLowerCase();
-  if (/listing\s+expense|issue\s+expense|estimated\s+expenses/.test(l)) return 'expenses';
-  if (/repay|reduction\s+of\s+(?:bank\s+)?borrowing|settle.*borrowing/.test(l)) return 'debt';
+  if (/listing\s+expense|issue\s+expense|estimated\s+expenses|defray\s+(?:the\s+)?(?:fees|expenses)|fees\s+and\s+expenses/.test(l))
+    return 'expenses';
+  if (/repay|repayment|reduction\s+of\s+(?:bank\s+)?borrowing|settle.*borrowing/.test(l)) return 'debt';
   if (/working\s+capital/.test(l)) return 'working_capital';
   if (
-    /machinery|equipment|capital\s+expenditure|capex|expansion|new\s+(?:factory|plant|outlet|branch)|software|automation|renovation|construction\s+of|acquisition|research|development|fleet|vehicle|upgrade/.test(
+    /machinery|equipment|capital\s+expenditure|capex|expansion|expenditure|new\s+(?:factory|plant|outlet|branch|dc|distribution)|establishment\s+of|network\s+of\s+outlets|software|automation|renovation|construction\s+of|acquisition|research|development|fleet|vehicle|truck|upgrad|store|outlet/.test(
       l,
     )
   ) {
@@ -435,50 +480,136 @@ function classifyProceeds(label: string): ProceedsUse['category'] {
   return 'other';
 }
 
+/**
+ * Parses the utilisation-of-proceeds table.
+ *
+ * Two layouts occur in Bursa prospectuses, and they differ in column order,
+ * units, and row numbering:
+ *   SLGC:  "Description of utilisation | RM'000 | % | timeframe"
+ *   99SM:  "Details of use of proceeds | timeframe | RM million | %"  (with
+ *          hierarchical 1./(i)/(ii) numbering and amounts in RM million)
+ *
+ * We locate the header flexibly, detect the unit scale, and match a data row
+ * as: a label, a timeframe token that may sit either before or after the two
+ * trailing numbers, and the amount/percent pair. Amounts are normalised to
+ * RM'000 so downstream maths is unit-consistent regardless of the source.
+ */
 function parseProceeds(idx: DocIndex): { uses: ProceedsUse[]; total: Field<number> } {
-  const header = findLine(idx, /Description\s+of\s+utilisation/i);
+  const header = findLine(
+    idx,
+    /(Description\s+of\s+utilisation|Details?\s+of\s+use\s+of\s+proceeds|Details?\s+of\s+utilisation|Purpose\s+of\s+utilisation)/i,
+  );
   if (!header) return { uses: [], total: missing<number>() };
+
+  // Determine the amount unit from the header region (default RM'000).
+  // The unit may be a standalone column header ("RM" on one line, "million"
+  // on the next), so we test the whole region for the words rather than
+  // requiring "RM million" to be adjacent.
+  const headerContext = idx.lines
+    .slice(Math.max(0, header.index - 3), header.index + 3)
+    .join(' ');
+  const scale = /RM\s*'?000|RM'000/i.test(headerContext)
+    ? 1 // already RM'000
+    : /\bbillion\b/i.test(headerContext)
+      ? 1_000_000
+      : /\bmillion\b|RM\s*'?m\b|\bmil\b/i.test(headerContext)
+        ? 1000 // RM million -> RM'000
+        : 1;
 
   const uses: ProceedsUse[] = [];
   let total: Field<number> = missing<number>();
 
-  for (let i = header.index + 1; i < Math.min(header.index + 40, idx.lines.length); i++) {
+  // Non-capturing so the group indices in the row patterns below stay stable.
+  const TIMEFRAME =
+    /(?:Within\s+\d+\s*\w+|Immediate\w*|Upon\s+[A-Za-z ]+?|By\s+\w+\s+\d{4})/i;
+
+  for (let i = header.index + 1; i < Math.min(header.index + 45, idx.lines.length); i++) {
     const line = idx.lines[i];
     if (/^Notes?:/i.test(line)) break;
 
-    // Total row.
-    const tm = line.match(/^Total\s+([\d,]+)\s+([\d.]+)\s*$/i);
+    // Total row (amount then optional pct).
+    const tm = line.match(/^Total\s+([\d,]+(?:\.\d+)?)\s+([\d.]+)?\s*$/i);
     if (tm) {
-      total = field(toNumber(tm[1]), { page: idx.linePages[i], raw: line });
+      const t = toNumber(tm[1]);
+      total = field(t === null ? null : t * scale, { page: idx.linePages[i], raw: line });
       break;
     }
 
-    // Data row: label [optional note ref] amount pct timeframe
-    const m = line.match(
-      /^(.+?)\s+(?:\([a-z]\)\s+)?([\d,]+)\s+([\d.]+)\s+(Within[^\d]*\d+\s*\w+|Immediate\w*|Upon[^$]*)$/i,
-    );
-    if (!m) continue;
+    // Strip leading hierarchical numbering: "1.", "(i)", "(a)", "2."
+    const stripped = line.replace(/^\s*(?:\d+\.|\([a-z0-9]+\))\s*/i, '');
 
-    let label = m[1].replace(/\s*\([a-z]\)\s*$/i, '').replace(/\s+/g, ' ').trim();
-    // The label often wraps, leaving its tail on the following line
-    // ("Purchase of construction machinery and" / "equipment"). Absorb a short
-    // all-lowercase continuation line that is not itself a table row.
+    // Layout A: label ... amount pct timeframe   (SLGC)
+    // Layout B: label ... timeframe amount pct   (99SM)
+    let label: string | null = null;
+    let amount: number | null = null;
+    let pct: number | null = null;
+    let timeframe: string | null = null;
+
+    const a = stripped.match(
+      new RegExp(`^(.+?)\\s+([\\d,]+(?:\\.\\d+)?)\\s+([\\d.]+)\\s+(${TIMEFRAME.source})\\s*$`, 'i'),
+    );
+    const b = stripped.match(
+      new RegExp(`^(.+?)\\s+(${TIMEFRAME.source})\\s+([\\d,]+(?:\\.\\d+)?)\\s+([\\d.]+)\\s*$`, 'i'),
+    );
+
+    if (a) {
+      label = a[1];
+      amount = toNumber(a[2]);
+      pct = toNumber(a[3]);
+      timeframe = a[4];
+    } else if (b) {
+      label = b[1];
+      timeframe = b[2];
+      amount = toNumber(b[3]);
+      pct = toNumber(b[4]);
+    } else {
+      continue;
+    }
+
+    label = label.replace(/\s*\([a-z0-9]\)\s*$/i, '').replace(/\s+/g, ' ').trim();
+    // Skip pure section headers like "Outlet and DC expenditure" that carry no
+    // numbers of their own (they matched only if they had trailing digits).
+    if (!label || amount === null) continue;
+
+    // Absorb a short wrapped continuation label on the next line.
     const next = idx.lines[i + 1];
     if (
       next &&
       /^[a-z][a-z\s]{1,40}$/.test(next.trim()) &&
-      !/^(total|notes?|within|there|description|immediate|upon)\b/i.test(next.trim())
+      !TIMEFRAME.test(next) &&
+      !/^(total|notes?|there|description|details)\b/i.test(next.trim())
     ) {
       label = `${label} ${next.trim()}`;
     }
 
     uses.push({
       label,
-      amount: toNumber(m[2]),
-      pct: toNumber(m[3]),
-      timeframe: m[4].replace(/\s+/g, ' ').trim(),
+      amount: amount === null ? null : amount * scale,
+      pct,
+      timeframe: timeframe ? timeframe.replace(/\s+/g, ' ').trim() : null,
       category: classifyProceeds(label),
     });
+  }
+
+  // If the table had no explicit Total row, fall back to the prose statement
+  // ("gross proceeds from our Public Issue amounting to RM660.0 million").
+  if (total.value === null) {
+    const proseTotal = findProse(
+      idx,
+      /gross\s+proceeds\s+from\s+(?:our\s+)?(?:the\s+)?Public\s+Issue\s+(?:of\s+|amounting\s+to\s+)(?:up\s+to\s+)?(?:approximately\s+)?RM\s?([\d.,]+)\s*(million|billion)?/i,
+    );
+    if (proseTotal) {
+      const n = toNumber(proseTotal.match[1]);
+      if (n !== null) {
+        const unit = proseTotal.match[2] ?? '';
+        const rmThousands = /billion/i.test(unit)
+          ? n * 1_000_000
+          : /million/i.test(unit)
+            ? n * 1000
+            : n;
+        total = field(rmThousands, { page: proseTotal.page, confidence: 'medium' });
+      }
+    }
   }
 
   return { uses, total };
@@ -544,14 +675,63 @@ function parseTimetable(idx: DocIndex): {
 // Financial highlights
 // ---------------------------------------------------------------------------
 
-/** Recognises a period-header row such as "FYE 2022 FYE 2023 ... FPE 2026". */
-function parsePeriodHeader(line: string): string[] | null {
-  const tokens = line.match(/\b(FYE|FPE|FYA)\s*(\d{4})\b/gi);
-  if (!tokens || tokens.length < 2) return null;
-  // Reject lines that also contain lots of other prose.
-  const consumed = tokens.join(' ').length;
-  if (consumed < line.replace(/\s+/g, ' ').length * 0.5) return null;
-  return tokens.map((t) => t.replace(/\s+/g, ' ').toUpperCase().trim());
+/**
+ * Builds period labels for a financial table given the number of data columns
+ * and the header lines directly above the first data row.
+ *
+ * Prospectuses format the header two ways:
+ *   inline   — "FYE 2022 FYE 2023 FYE 2024 FYE 2025 FPE 2026"
+ *   split    — "FYE            FPE 31 March"   (types)
+ *              "2021 2022 2023 2023 2024"       (years, one per column)
+ *
+ * The split form defeats a single-line regex, so when we cannot find `columns`
+ * inline labels we fall back to pairing the trailing run of year tokens with
+ * the period-type words (FYE/FPE) that precede them. This is what lets a retail
+ * IPO like 99 Speed Mart parse where the construction template assumption did
+ * not hold.
+ */
+function buildPeriodLabels(headerLines: string[], columns: number): string[] | null {
+  const joined = headerLines.join(' ').replace(/\s+/g, ' ');
+
+  // 1) Fully inline labels present?
+  const inline = joined.match(/\b(FYE|FPE|FYA)\s*(\d{4})\b/gi);
+  if (inline && inline.length === columns) {
+    return inline.map((t) => t.replace(/\s+/g, ' ').toUpperCase().trim());
+  }
+
+  // 2) Split header: take the last `columns` bare year tokens as the columns,
+  //    then decide FYE vs FPE per column from the surrounding type words.
+  const years = joined.match(/\b(19|20)\d{2}\b/g);
+  if (!years || years.length < columns) return null;
+  const cols = years.slice(years.length - columns);
+
+  // Decide which trailing columns are FPE (partial/interim) periods.
+  //
+  // Strongest signal: a repeated year. Prospectuses show an interim period
+  // alongside its prior-year comparative, e.g. years "2021 2022 2023 2023 2024"
+  // where the final "2023 2024" pair are both FPE (the comparative FPE 2023 and
+  // the current FPE 2024). The first index at which a year repeats marks where
+  // the FPE block begins.
+  let fpeStart = -1;
+  for (let i = 1; i < cols.length; i++) {
+    if (cols[i] === cols[i - 1]) {
+      // The repeated year is the FPE comparative; the earlier occurrence is
+      // the full FYE. So the FPE block begins at the *second* occurrence.
+      fpeStart = i;
+      break;
+    }
+  }
+
+  // Fallback: if no repeat, treat the trailing FPE-mention count as interim.
+  if (fpeStart < 0) {
+    const fpeCount = (joined.match(/\bFPE\b/gi) ?? []).length;
+    if (fpeCount > 0) fpeStart = columns - Math.min(fpeCount, columns);
+  }
+
+  return cols.map((y, i) => {
+    const isFpe = fpeStart >= 0 && i >= fpeStart;
+    return `${isFpe ? 'FPE' : 'FYE'} ${y}`;
+  });
 }
 
 interface RowSpec {
@@ -601,33 +781,66 @@ const RATIO_ROWS: RowSpec[] = [
  * unusually.
  */
 function parseFinancialPeriods(idx: DocIndex): FinancialPeriod[] {
-  const headers = findAllLines(idx, /\b(?:FYE|FPE)\s*\d{4}\b/i)
-    .map((hit) => ({ hit, labels: parsePeriodHeader(hit.line) }))
-    .filter((c): c is { hit: LineHit; labels: string[] } => c.labels !== null);
+  // Anchor on the Revenue/Turnover row: it is present in every profit-or-loss
+  // highlights table and its number count tells us how many period columns the
+  // table has, without depending on the header being on a single line.
+  const revenueHits = findAllLines(idx, /^(Revenue|Turnover)\b/i).filter((hit) => {
+    const nums = rowNumbers(stripLabelNoise(hit.line));
+    return nums.length >= 2 && nums.length <= 8 && nums.every((n) => n === null || n > 1);
+  });
 
   let best: { periods: FinancialPeriod[]; score: number } | null = null;
 
-  for (const { hit, labels } of headers) {
+  for (const revHit of revenueHits) {
+    const revNums = rowNumbers(stripLabelNoise(revHit.line));
+    const columns = revNums.length;
+
+    // Reconstruct period labels from the up-to-6 header lines above Revenue.
+    const headerLines: string[] = [];
+    for (let i = Math.max(0, revHit.index - 6); i < revHit.index; i++) {
+      headerLines.push(idx.lines[i]);
+    }
+    const headerRegion = headerLines.join(' ');
+
+    // A genuine profit-or-loss highlights table has period columns (FYE/FPE or
+    // a run of years) in its header. Segmental/geographic breakdowns instead
+    // have category columns and a "Cost of sales" line whose columns sum to the
+    // last column — reject those so we don't parse a by-product revenue split
+    // as if it were the historical track record.
+    const labels = buildPeriodLabels(headerLines, columns);
+    const headerHasPeriods =
+      /\b(FYE|FPE)\b/i.test(headerRegion) ||
+      (headerRegion.match(/\b(19|20)\d{2}\b/g) ?? []).length >= columns;
+    if (!labels || !headerHasPeriods) continue;
+
     const periods = labels.map((l) => emptyPeriod(l.replace(/\s+/g, ' ')));
     let score = 0;
 
-    for (let i = hit.index + 1; i < Math.min(hit.index + 22, idx.lines.length); i++) {
+    // Walk the rows of this table (Revenue downward) until it clearly ends.
+    for (let i = revHit.index; i < Math.min(revHit.index + 26, idx.lines.length); i++) {
       const line = idx.lines[i];
-      if (parsePeriodHeader(line)) break; // next table started
-      if (/^(Notes?:|Section|\d+\.\d)/i.test(line)) break;
+      if (i !== revHit.index) {
+        if (/^(Notes?:|Section\b|\d+\.\d)/i.test(line)) break;
+        // A fresh period header signals the next table.
+        if (/\b(FYE|FPE)\b/i.test(line) && rowNumbers(stripLabelNoise(line)).length === 0) break;
+      }
 
       for (const spec of [...FINANCIAL_ROWS, ...RATIO_ROWS]) {
         if (!spec.patterns.some((p) => p.test(line))) continue;
         const nums = rowNumbers(stripLabelNoise(line));
-        if (nums.length < labels.length) continue;
+        if (nums.length < columns) continue;
         // Values align to the right-most N columns (leading tokens may be note refs).
-        const values = nums.slice(nums.length - labels.length);
+        const values = nums.slice(nums.length - columns);
         let filled = 0;
         values.forEach((v, c) => {
           if (v !== null) filled++;
           (periods[c] as unknown as Record<string, number | null>)[spec.key as string] = v;
         });
         if (filled > 0) score += 1;
+        // A bottom-line profit row (PBT/PAT) strongly identifies the real
+        // profit-or-loss table over a segmental revenue breakdown, which
+        // reports only revenue/GP by segment. Weight it heavily.
+        if ((spec.key === 'pat' || spec.key === 'pbt') && filled > 0) score += 5;
         break;
       }
     }
@@ -637,12 +850,61 @@ function parseFinancialPeriods(idx: DocIndex): FinancialPeriod[] {
 
   if (!best) return [];
 
-  // Merge in per-period ratios and dividends from their own tables, which use
-  // the same period columns but live in different sections.
+  // Merge in per-period ratios, margins, EPS and dividends from their own
+  // rows. The winning table may not contain every derived row within its
+  // window (a page break can separate margins from the P&L), so we fill any
+  // gaps from the canonical single rows elsewhere in the document.
+  mergeRowByLabel(idx, best.periods, 'gpMargin', [/^GP\s+margin\b/i, /^Gross\s+profit\s+margin\b/i]);
+  mergeRowByLabel(idx, best.periods, 'patMargin', [/^PAT\s+margin\b/i, /^Net\s+profit\s+margin\b/i]);
   mergeRatioTables(idx, best.periods);
+  mergeEps(idx, best.periods);
   mergeDividends(idx, best.periods);
 
   return best.periods;
+}
+
+/**
+ * Fills a single financial row (by label) from anywhere in the document when
+ * the chosen P&L table did not already capture it, matching only a row whose
+ * column count equals the number of periods.
+ */
+function mergeRowByLabel(
+  idx: DocIndex,
+  periods: FinancialPeriod[],
+  key: keyof FinancialPeriod,
+  patterns: RegExp[],
+) {
+  if (periods.some((p) => p[key] !== null)) return;
+  for (const pattern of patterns) {
+    for (const hit of findAllLines(idx, pattern)) {
+      const nums = rowNumbers(stripLabelNoise(hit.line));
+      if (nums.length !== periods.length) continue;
+      nums.forEach((v, c) => {
+        (periods[c] as unknown as Record<string, number | null>)[key as string] = v;
+      });
+      return;
+    }
+  }
+}
+
+/**
+ * EPS is often tabulated separately from the P&L highlights (e.g. in the
+ * "basis of the IPO price" section). Fill it in if the main pass missed it.
+ */
+function mergeEps(idx: DocIndex, periods: FinancialPeriod[]) {
+  if (periods.some((p) => p.eps !== null)) return;
+  const hits = findAllLines(idx, /^Basic\s+and\s+diluted\s+(?:EPS\s+)?(?:\(sen\)\s+)?[\d(.-]/i);
+  for (const hit of hits) {
+    const nums = rowNumbers(stripLabelNoise(hit.line));
+    if (nums.length < periods.length) continue;
+    const values = nums.slice(nums.length - periods.length);
+    // EPS in sen is a small number; guard against grabbing a share-count row.
+    if (!values.every((v) => v === null || Math.abs(v) < 1000)) continue;
+    values.forEach((v, c) => {
+      periods[c].eps = v;
+    });
+    return;
+  }
 }
 
 /** Removes footnote markers and units that would be mistaken for data. */
@@ -793,9 +1055,10 @@ function parseCustomerConcentration(idx: DocIndex): Field<number[]> {
 
 function parseEmployees(idx: DocIndex): Field<number> {
   const patterns: RegExp[] = [
-    /total\s+workforce\s+of\s+([\d,]{2,7})\s+(?:permanent\s+|full[-\s]time\s+)?employees/i,
+    /total\s+workforce\s+of\s+(?:over\s+|approximately\s+)?([\d,]{2,7})\s+(?:permanent\s+|full[-\s]time\s+)?employees/i,
     /(?:we|our\s+Group)\s+ha(?:d|s|ve)\s+(?:a\s+total\s+(?:of|workforce\s+of)\s+)?([\d,]{2,7})\s+(?:permanent\s+)?employees/i,
     /total\s+(?:of\s+)?([\d,]{2,7})\s+employees\s+as\s+at/i,
+    /workforce\s+of\s+(?:over\s+|approximately\s+)?([\d,]{2,7})\s+employees/i,
     /workforce\s+(?:of|comprised\s+of)\s+([\d,]{2,7})\s+(?:permanent\s+)?employees/i,
   ];
   for (const re of patterns) {
@@ -984,18 +1247,25 @@ function parseDividendPolicy(idx: DocIndex): {
     };
   }
 
-  const target = findProse(
-    idx,
-    /dividend\s+policy[^.]{0,120}?(?:of\s+|to\s+distribute\s+)(?:at\s+least\s+)?([\d.]+)%\s+of\s+our[^.]{0,40}?profit/i,
-  );
-  if (target) {
-    return {
-      text: field(`Target payout: ${target.match[1]}% of profit`, {
-        page: target.page,
-        raw: target.match[0],
-      }),
-      formal: field(true, { page: target.page }),
-    };
+  // Formal policies are phrased several ways, e.g.
+  //   "We target a payout ratio of approximately 50% of our PAT ..."
+  //   "dividend policy of up to 30% of our profit after tax ..."
+  const targetPatterns: RegExp[] = [
+    /(?:target|targeting)\s+a\s+(?:dividend\s+)?payout\s+ratio\s+of\s+(?:approximately\s+|up\s+to\s+|at\s+least\s+)?([\d.]+)%/i,
+    /dividend\s+policy[^.]{0,120}?(?:of\s+|to\s+distribute\s+)(?:up\s+to\s+|at\s+least\s+)?([\d.]+)%/i,
+    /payout\s+ratio\s+of\s+(?:approximately\s+|up\s+to\s+|at\s+least\s+)?([\d.]+)%\s+of\s+(?:our\s+)?(?:PAT|profit)/i,
+  ];
+  for (const re of targetPatterns) {
+    const target = findProse(idx, re);
+    if (target) {
+      return {
+        text: field(`Target payout: ~${target.match[1]}% of profit`, {
+          page: target.page,
+          raw: target.match[0],
+        }),
+        formal: field(true, { page: target.page }),
+      };
+    }
   }
   return { text: missing<string>(), formal: missing<boolean>() };
 }
