@@ -1,0 +1,32 @@
+{
+  "name": "bursa-ipo-analyser",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Turns a Bursa Malaysia IPO prospectus into a two-page decision sheet. Runs entirely in the browser.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "test": "npm run test:parser && npm run test:render",
+    "test:parser": "node --experimental-strip-types scripts/test-parser.mjs",
+    "test:render": "node scripts/run-ssr.mjs",
+    "fixture": "node --experimental-strip-types scripts/extract-fixture.mjs"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.3.289",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "recharts": "^3.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "oxlint": "^1.81.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  }
+}
