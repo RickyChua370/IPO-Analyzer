@@ -200,23 +200,37 @@ function parseProspectusDate(idx: DocIndex): Field<string> {
 }
 
 function parseBusinessDescription(idx: DocIndex): Field<string> {
-  // Section 3.2 states the principal activity in a consistent form.
-  const hit = findProse(
-    idx,
+  // The principal-activity sentence is phrased several ways across prospectuses.
+  const patterns: RegExp[] = [
     /Through our subsidiar(?:y|ies),?\s+we are\s+principally involved in\s+(?:the\s+)?([^.]{10,300}?)\./i,
-  );
-  if (hit) return field(cleanProse(hit.match[1]), { page: hit.page });
-
-  const alt = findProse(
-    idx,
     /we are\s+principally involved in\s+(?:the\s+)?([^.]{10,300}?)\./i,
-  );
-  if (alt) return field(cleanProse(alt.match[1]), { page: alt.page, confidence: 'medium' });
+    // "...involved in the retailing of FMCG across Malaysia" (99 Speed Mart)
+    /(?:chain\s+of\s+)?[a-z-]+\s+outlets?\s+involved\s+in\s+(?:the\s+)?([^.]{10,200}?)\./i,
+    /\bengaged\s+in\s+(?:the\s+)?([^.]{10,300}?)\./i,
+    /principal\s+activit(?:y|ies)\s+(?:of\s+our\s+Group\s+)?(?:is|are|comprises?)\s+(?:that\s+of\s+)?(?:an?\s+)?([^.]{10,300}?)\./i,
+    // "we operate ... 'Speedmart' chain of mini-market outlets" — capture role
+    /we\s+(?:operate|own\s+and\s+operate)\s+(?:a\s+|the\s+)?([^.]{10,200}?)\./i,
+  ];
+  for (let k = 0; k < patterns.length; k++) {
+    const hit = findProse(idx, patterns[k]);
+    if (hit && hit.match[1] && hit.match[1].trim().length >= 10) {
+      return field(cleanProse(hit.match[1]), {
+        page: hit.page,
+        confidence: k === 0 ? 'high' : 'medium',
+      });
+    }
+  }
   return missing<string>();
 }
 
 function cleanProse(s: string): string {
-  return s.replace(/\s+/g, ' ').replace(/\s+([,.])/g, '$1').trim();
+  return s
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.])/g, '$1')
+    // Drop a dangling lead-in left by list-style activities ("...following: (a) ...").
+    .replace(/^(?:the\s+)?following:?\s*/i, '')
+    .replace(/^\([a-z]\)\s*/i, '')
+    .trim();
 }
 
 /**
@@ -243,7 +257,8 @@ function parseIndustry(idx: DocIndex, description: string | null): Field<string>
     ['Technology', /\b(software|information technology|\bsaas\b|semiconductor|data cent(?:re|er)|fintech|cloud computing|it solutions|app develop)\b/g],
     ['Logistics & Transport', /\b(logistics|freight|haulage|warehousing services|shipping|cold chain|last[- ]mile|courier)\b/g],
     ['Food & Beverage', /\b(food and beverage|\bf&b\b|restaurant|catering|confectioner|beverage manufactur|packaged food)\b/g],
-    ['Retail & Consumer', /\b(retail outlet|mini[- ]?market|convenience store|consumer products|e-commerce|grocery|departmental store)\b/g],
+    ['Consumer Services', /\b(vending|massage|leisure|wellness|spa|fitness|gym|entertainment|amusement|rental plans?|rental services|karaoke|hospitality services)\b/g],
+    ['Retail & Consumer', /\b(retail outlet|retailing|mini[- ]?market|convenience store|consumer products|e-commerce|grocery|\bfmcg\b|departmental store|chain of|supermarket)\b/g],
     ['Agriculture', /\b(plantation|palm oil|agricultur|aquacultur|poultry|fisheries|crop)\b/g],
     ['Education', /\b(education|tuition|training centre|private college|university|academic)\b/g],
     ['Manufacturing', /\b(manufactur|fabricat|assembly plant|production facilit|industrial products)\b/g],
@@ -536,19 +551,32 @@ function classifyProceeds(label: string): ProceedsUse['category'] {
  */
 function parseProceeds(idx: DocIndex): { uses: ProceedsUse[]; total: Field<number> } {
   // Header wording varies widely across prospectuses:
-  //   "Description of utilisation"            (SLGC)
-  //   "Details of use of proceeds"            (99 Speed Mart)
-  //   "Description of use of proceeds"        (Sunway)
-  //   "Details/Purpose of utilisation", "Proposed utilisation", etc.
-  // Match any "<Description|Details|Purpose> of (use of proceeds|utilisation)".
-  const header =
-    findLine(
-      idx,
-      /(?:Description|Details?|Purpose|Proposed)\s+(?:of\s+)?(?:use\s+of\s+proceeds|utilisation|utilization)/i,
-    ) ??
-    // Fallback: a line that is just the column headers "... RM'000 %" following
-    // a "use of proceeds" mention.
-    findLine(idx, /use\s+of\s+proceeds\b[^%]*\bRM\s*['’]?\s*(?:000|million)?\s*%?\s*$/i);
+  //   "Description of utilisation | RM'000 | % | timeframe"   (SLGC)
+  //   "Details of use of proceeds | timeframe | RM million | %"  (99 Speed Mart)
+  //   "Description of use of proceeds | RM'000 | %"           (Sunway)
+  //   "Utilisation of proceeds | RM'000 | % | timeframe"      (RNG Tech)
+  //
+  // The tricky part: "Utilisation of proceeds" is also the *section heading*
+  // (e.g. "2.9 UTILISATION OF PROCEEDS"), which is not the table. So we accept
+  // a bare "Utilisation of proceeds" line only when it also carries the table's
+  // column markers (RM'000 / RM million and/or %), which the heading never has.
+  const isColumnHeader = (line: string): boolean => {
+    const hasProceedsLabel =
+      /(?:Description|Details?|Purpose|Proposed)\s+(?:of\s+)?(?:use\s+of\s+proceeds|utilisation|utilization)/i.test(
+        line,
+      ) || /^Utilisation\s+of\s+proceeds\b/i.test(line);
+    if (!hasProceedsLabel) return false;
+    // Require a units/percent column marker so we skip the plain section title.
+    return /\bRM\s*['’]?\s*(?:000|million|mil|m)\b|%/i.test(line);
+  };
+
+  let header: LineHit | null = null;
+  for (let i = 0; i < idx.lines.length; i++) {
+    if (isColumnHeader(idx.lines[i])) {
+      header = { line: idx.lines[i], index: i, page: idx.linePages[i], match: [idx.lines[i]] };
+      break;
+    }
+  }
   if (!header) return { uses: [], total: missing<number>() };
 
   // Determine the amount unit from the header region (default RM'000).
@@ -621,15 +649,20 @@ function parseProceeds(idx: DocIndex): { uses: ProceedsUse[]; total: Field<numbe
     // numbers of their own (they matched only if they had trailing digits).
     if (!label || amount === null) continue;
 
-    // Absorb a short wrapped continuation label on the next line.
-    const next = idx.lines[i + 1];
+    // Absorb a short wrapped continuation label on the next line. Prospectus
+    // labels wrap mid-phrase ("... existing RNG" / "stations and RNG premium
+    // outlets"), so allow a short line that carries no figures and is not
+    // itself a new row — it may contain capitalised words/acronyms (RNG, DC).
+    const next = idx.lines[i + 1]?.trim();
     if (
       next &&
-      /^[a-z][a-z\s]{1,40}$/.test(next.trim()) &&
+      next.length <= 45 &&
+      !/\d/.test(next) &&
       !TIMEFRAME.test(next) &&
-      !/^(total|notes?|there|description|details)\b/i.test(next.trim())
+      !/^(total|notes?|there|description|details|utilisation|purpose|proposed)\b/i.test(next)
     ) {
-      label = `${label} ${next.trim()}`;
+      label = `${label} ${next}`;
+      i += 1; // consume the continuation line so it is not re-examined
     }
 
     uses.push({
