@@ -9,12 +9,14 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "npm run test:parser && npm run test:99sm && npm run test:render",
+    "test": "npm run test:parser && npm run test:99sm && npm run test:sunmed && npm run test:render",
     "test:parser": "node --experimental-strip-types scripts/test-parser.mjs",
     "test:99sm": "node --experimental-strip-types scripts/test-99sm.mjs",
+    "test:sunmed": "node --experimental-strip-types scripts/test-sunmed.mjs",
     "test:render": "node scripts/run-ssr.mjs",
     "fixture": "node --experimental-strip-types scripts/extract-fixture.mjs",
-    "fixture:99sm": "node --experimental-strip-types scripts/extract-99sm.mjs"
+    "fixture:99sm": "node --experimental-strip-types scripts/extract-99sm.mjs",
+    "fixture:sunmed": "node --experimental-strip-types scripts/extract-sunmed.mjs"
   },
   "dependencies": {
     "pdfjs-dist": "^6.3.289",

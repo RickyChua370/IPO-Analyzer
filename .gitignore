@@ -7,3 +7,4 @@ app/fixtures/
 .vite/
 *.tsbuildinfo
 99sm-test/
+sunmed-test/

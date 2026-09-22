@@ -227,25 +227,43 @@ function cleanProse(s: string): string {
  * comparison view's grouping, never for any threshold or flag.
  */
 function parseIndustry(idx: DocIndex, description: string | null): Field<string> {
-  const haystack = `${description ?? ''} ${idx.flat.slice(0, 40_000)}`.toLowerCase();
+  // The stated principal activity (business description) is the most reliable
+  // signal, so weight it far more heavily than the rest of the document, where
+  // stray mentions of "software" or "technology" would otherwise mislead a
+  // first-match heuristic (e.g. tagging a hospital group as "Technology").
+  const desc = (description ?? '').toLowerCase();
+  const bulk = idx.flat.slice(0, 60_000).toLowerCase();
+
   const sectors: [string, RegExp][] = [
-    ['Construction & Engineering', /building construction|civil engineering|contractor|earthworks|infrastructure works/],
-    ['Property Development', /property develop|real estate develop|township develop/],
-    ['Manufacturing', /manufactur|fabricat|assembly plant|production facilit/],
-    ['Technology', /software|information technology|\bsaas\b|semiconductor|data cent/],
-    ['Healthcare', /healthcare|hospital|clinic|pharmaceutic|medical device/],
-    ['Oil & Gas', /oil and gas|petroleum|upstream|downstream|offshore support/],
-    ['Logistics & Transport', /logistics|freight|haulage|warehousing services|shipping/],
-    ['Food & Beverage', /food and beverage|\bf&b\b|restaurant|catering|confectioner/],
-    ['Retail & Consumer', /retail outlet|consumer products|e-commerce|trading of consumer/],
-    ['Agriculture', /plantation|palm oil|agricultur|aquacultur|poultry/],
-    ['Education', /education|tuition|training centre|private college/],
-    ['Financial Services', /money lending|insurance broking|fund management|payment services/],
-    ['Renewable Energy', /solar|renewable energy|photovoltaic|\bepcc\b/],
+    ['Healthcare', /\b(healthcare|hospital|medical centre|medical center|clinic|ambulatory|pharmaceutic|medical device|senior living|nursing|patient|specialist care|tcm centre)\b/g],
+    ['Construction & Engineering', /\b(building construction|civil engineering|contractor|earthworks|infrastructure works|cidb|g7 contractor|piling|substructure)\b/g],
+    ['Property Development', /\b(property develop|real estate develop|township develop|property investment|land bank)\b/g],
+    ['Oil & Gas', /\b(oil and gas|petroleum|upstream|downstream|offshore support|drilling|fpso)\b/g],
+    ['Renewable Energy', /\b(solar|renewable energy|photovoltaic|\bepcc\b|power plant|solar farm)\b/g],
+    ['Technology', /\b(software|information technology|\bsaas\b|semiconductor|data cent(?:re|er)|fintech|cloud computing|it solutions|app develop)\b/g],
+    ['Logistics & Transport', /\b(logistics|freight|haulage|warehousing services|shipping|cold chain|last[- ]mile|courier)\b/g],
+    ['Food & Beverage', /\b(food and beverage|\bf&b\b|restaurant|catering|confectioner|beverage manufactur|packaged food)\b/g],
+    ['Retail & Consumer', /\b(retail outlet|mini[- ]?market|convenience store|consumer products|e-commerce|grocery|departmental store)\b/g],
+    ['Agriculture', /\b(plantation|palm oil|agricultur|aquacultur|poultry|fisheries|crop)\b/g],
+    ['Education', /\b(education|tuition|training centre|private college|university|academic)\b/g],
+    ['Manufacturing', /\b(manufactur|fabricat|assembly plant|production facilit|industrial products)\b/g],
+    ['Financial Services', /\b(money lending|insurance broking|fund management|payment services|financing|credit)\b/g],
   ];
+
+  const count = (re: RegExp, text: string) => (text.match(re) ?? []).length;
+
+  let bestLabel: string | null = null;
+  let bestScore = 0;
   for (const [label, re] of sectors) {
-    if (re.test(haystack)) return field(label, { confidence: 'medium' });
+    const score = count(re, desc) * 8 + count(re, bulk);
+    if (score > bestScore) {
+      bestScore = score;
+      bestLabel = label;
+    }
   }
+
+  // Require a minimum signal so we don't guess a sector from one stray word.
+  if (bestLabel && bestScore >= 2) return field(bestLabel, { confidence: 'medium' });
   return missing<string>();
 }
 
@@ -275,12 +293,28 @@ function parseIpoPrice(idx: DocIndex): Field<number> {
 }
 
 function parseMarketCap(idx: DocIndex): Field<number> {
-  const patterns: RegExp[] = [
-    /Market\s+capitalisation\s*(?:\(\d\))?\s*RM\s?([\d,]+)/i,
-    /total\s+market\s+capitalisation\s+will\s+be\s+RM\s?([\d,]+)/i,
-    /market\s+capitalisation\s+(?:upon\s+Listing\s+)?of\s+RM\s?([\d,]+)/i,
+  // Prose forms with an explicit unit ("approximately RM16.7 billion") — scale
+  // to ringgit. Handles million/billion and the "will be / of / is" variants.
+  const proseUnit = [
+    /total\s+market\s+capitalisation\s+of\s+our\s+Company\s+upon\s+(?:our\s+)?Listing\s+(?:would\s+be\s+|is\s+|will\s+be\s+)?(?:approximately\s+)?RM\s?([\d.,]+)\s*(million|billion)/i,
+    /market\s+capitalisation\s+(?:upon\s+(?:our\s+)?Listing\s+)?(?:would\s+be\s+|is\s+|will\s+be\s+|of\s+)?(?:approximately\s+)?RM\s?([\d.,]+)\s*(million|billion)/i,
   ];
-  for (const re of patterns) {
+  for (const re of proseUnit) {
+    const hit = findProse(idx, re);
+    const v = toNumber(hit?.match[1]);
+    if (hit && v !== null) {
+      const unit = hit.match[2] ?? '';
+      const rm = /billion/i.test(unit) ? v * 1_000_000_000 : v * 1_000_000;
+      return field(rm, { page: hit.page, raw: hit.match[0] });
+    }
+  }
+  // Table/plain forms already in ringgit (no unit word).
+  const plain: RegExp[] = [
+    /Market\s+capitalisation\s*(?:upon\s+Listing\s*)?(?:\(\d\))?\s*RM\s?([\d,]{6,})/i,
+    /total\s+market\s+capitalisation\s+will\s+be\s+RM\s?([\d,]{6,})/i,
+    /market\s+capitalisation\s+(?:upon\s+Listing\s+)?of\s+RM\s?([\d,]{6,})/i,
+  ];
+  for (const re of plain) {
     const hit = findProse(idx, re);
     const v = toNumber(hit?.match[1]);
     if (hit && v !== null && v > 1000) return field(v, { page: hit.page, raw: hit.match[0] });
@@ -639,21 +673,34 @@ function parseTimetable(idx: DocIndex): {
   close: Field<string>;
   listing: Field<string>;
 } {
-  const header = findLine(idx, /^Events\s+Indicative\s+date\s*$/i);
+  // The header varies: "Events Indicative date" (ACE) or "Event Time and/or
+  // date" (Main Market). Match either.
+  const header =
+    findLine(idx, /^Events?\s+Indicative\s+date\s*$/i) ??
+    findLine(idx, /^Events?\s+Time\s+and\s*\/?\s*or\s+date\s*$/i) ??
+    findLine(idx, /^Events?\s+(?:Indicative\s+)?(?:time|date)/i);
   const timetable: TimetableEntry[] = [];
 
   if (header) {
-    for (let i = header.index + 1; i < Math.min(header.index + 15, idx.lines.length); i++) {
-      const m = idx.lines[i].match(/^(.+?)\s+(\d{1,2}\s+\w+\s+\d{4})\s*$/);
+    for (let i = header.index + 1; i < Math.min(header.index + 18, idx.lines.length); i++) {
+      const line = idx.lines[i];
+      // A date at the end, optionally preceded by a time ("10.00 a.m., ").
+      const m = line.match(
+        /^(.+?)\s+(?:\d{1,2}\.\d{2}\s*[ap]\.?m\.?,?\s*)?(\d{1,2}\s+\w+\s+\d{4})\s*$/i,
+      );
       if (!m) {
-        if (timetable.length > 0) break;
+        if (timetable.length > 0 && /^(Notes?:|\(\d\))/i.test(line)) break;
         continue;
       }
-      timetable.push({
-        event: m[1].replace(/\s+/g, ' ').trim(),
-        date: m[2],
-        iso: toIso(m[2]),
-      });
+      let event = m[1].replace(/\s+/g, ' ').replace(/\(\d\)\s*$/, '').trim();
+      // Absorb a wrapped event tail from the next line (e.g. "... under the
+      // Retail" / "Offering").
+      const next = idx.lines[i + 1];
+      if (next && /^[A-Z][a-z]/.test(next) && next.trim().length < 20 && !/\d{4}/.test(next)) {
+        event = `${event} ${next.trim()}`;
+      }
+      timetable.push({ event, date: m[2], iso: toIso(m[2]) });
+      if (timetable.length >= 12) break;
     }
   }
 
@@ -665,9 +712,9 @@ function parseTimetable(idx: DocIndex): {
 
   return {
     timetable,
-    open: pick(/opening\s+of\s+application/i),
-    close: pick(/clos(?:ing|e)\s+(?:date|of\s+application)/i),
-    listing: pick(/date\s+of\s+listing|listing\s+on\s+the/i),
+    open: pick(/opening\s+of\s+(?:the\s+)?(?:application|retail)/i),
+    close: pick(/clos(?:ing|e)\s+(?:date|of\s+(?:the\s+)?(?:application|retail))/i),
+    listing: pick(/^listing\b|date\s+of\s+listing|listing\s+on\s+the/i),
   };
 }
 
@@ -747,29 +794,93 @@ interface RowSpec {
  * would be captured as gross profit, silently overwriting the real figure.
  */
 const FINANCIAL_ROWS: RowSpec[] = [
-  { key: 'revenue', patterns: [/^Revenue\b/i, /^Turnover\b/i] },
+  { key: 'revenue', patterns: [/^Revenue\b/i, /^Turnover\b/i, /^Total\s+revenue\b/i] },
+  // Margins are matched before their base figures so "GP margin (%)" is never
+  // mistaken for "GP", and "... margin" variants never fall through to profit.
   { key: 'gpMargin', patterns: [/^GP\s+margin\b/i, /^Gross\s+profit\s+margin\b/i] },
-  { key: 'patMargin', patterns: [/^PAT\s+margin\b/i, /^Net\s+profit\s+margin\b/i] },
+  {
+    key: 'patMargin',
+    patterns: [
+      /^PAT\s+margin\b/i,
+      /^PATAMI\s+margin\b/i,
+      /^PATMI\s+margin\b/i,
+      /^Net\s+profit\s+margin\b/i,
+      /^Net\s+margin\b/i,
+      /^Profit\s+margin\b/i,
+    ],
+  },
   { key: 'grossProfit', patterns: [/^GP(?!\s*margin)\b/i, /^Gross\s+profit(?!\s*margin)\b/i] },
-  { key: 'otherIncome', patterns: [/^Other\s+operating\s+income\b/i, /^Other\s+operating\b/i, /^Other\s+income\b/i] },
-  { key: 'pbt', patterns: [/^PBT(?!\s*margin)\b/i, /^Profit\s+before\s+tax(?:ation)?\b/i] },
-  { key: 'pat', patterns: [/^PAT(?!\s*margin)\b/i, /^Profit\s+after\s+tax(?:ation)?\b/i, /^Net\s+profit(?!\s*margin)\b/i] },
+  {
+    key: 'otherIncome',
+    patterns: [
+      /^Other\s+operating\s+income\b/i,
+      /^Other\s+operating\b/i,
+      /^Other\s+income\b/i,
+      /^Other\s+(?:gains|revenue)\b/i,
+    ],
+  },
+  {
+    key: 'pbt',
+    patterns: [
+      /^PBT(?!\s*margin)\b/i,
+      /^Profit\s+before\s+tax(?:ation)?\b/i,
+      /^Profit\s*\/?\s*\(loss\)\s+before\s+tax(?:ation)?\b/i,
+      /^\(Loss\)\s*\/?\s*profit\s+before\s+tax(?:ation)?\b/i,
+      /^Profit\s+before\s+income\s+tax\b/i,
+    ],
+  },
+  {
+    key: 'pat',
+    patterns: [
+      /^PAT(?!\s*margin|MI|AMI)\b/i,
+      /^PATAMI(?!\s*margin)\b/i,
+      /^PATMI(?!\s*margin)\b/i,
+      /^Profit\s+after\s+tax(?:ation)?(?!\s*margin)\b/i,
+      /^Net\s+profit(?!\s*margin)\b/i,
+      // IFRS-style phrasings common in large-cap prospectuses.
+      /^Profit\s+for\s+the\s+(?:financial\s+)?(?:year|period)(?:\s*\/\s*period)?\b/i,
+      /^Profit\s*\/?\s*\(loss\)\s+for\s+the\s+(?:financial\s+)?(?:year|period)\b/i,
+      /^\(Loss\)\s*\/?\s*profit\s+for\s+the\s+(?:financial\s+)?(?:year|period)\b/i,
+      /^Profit\s+attributable\s+to\s+(?:the\s+)?owners\b/i,
+      /^Net\s+profit\s+attributable\s+to\b/i,
+    ],
+  },
   {
     key: 'eps',
     patterns: [
       /^Basic\s+and\s+diluted\s+EPS\b/i,
       // The label frequently wraps, leaving the data row as "Basic and diluted <numbers>".
       /^Basic\s+and\s+diluted\s+[\d(.]/i,
+      /^Basic\s*\/?\s*diluted\s+EPS\b/i,
       /^EPS\s*(?:\(sen\))?\s+[\d(.]/i,
       /^Basic\s+EPS\b/i,
+      /^Earnings\s+per\s+[Ss]hare\b/i,
     ],
   },
 ];
 
 const RATIO_ROWS: RowSpec[] = [
-  { key: 'receivablesDays', patterns: [/^Trade\s+receivables\s+turnover\b/i] },
+  {
+    key: 'receivablesDays',
+    patterns: [
+      /^Trade\s+receivables\s+turnover\b/i,
+      /^Trade\s+receivable(?:s)?\s+(?:turnover\s+)?(?:period|days)\b/i,
+      /^(?:Average\s+)?(?:trade\s+)?(?:debtors|receivables)\s+(?:turnover|collection|days)\b/i,
+      /^Debtor(?:s)?\s+(?:turnover\s+)?days\b/i,
+    ],
+  },
   { key: 'currentRatio', patterns: [/^Current\s+ratio\b/i] },
-  { key: 'gearing', patterns: [/^Gearing\s+ratio\b/i] },
+  {
+    // Prefer net gearing where reported (it nets off cash), else gross/total.
+    key: 'gearing',
+    patterns: [
+      /^Net\s+gearing(?:\s+ratio)?\b/i,
+      /^Gross\s+gearing(?:\s+ratio)?\b/i,
+      /^Gearing\s+ratio\b/i,
+      /^Gearing\b/i,
+      /^(?:Total\s+)?[Dd]ebt[\s-]*to[\s-]*equity(?:\s+ratio)?\b/i,
+    ],
+  },
 ];
 
 /**
@@ -855,7 +966,13 @@ function parseFinancialPeriods(idx: DocIndex): FinancialPeriod[] {
   // window (a page break can separate margins from the P&L), so we fill any
   // gaps from the canonical single rows elsewhere in the document.
   mergeRowByLabel(idx, best.periods, 'gpMargin', [/^GP\s+margin\b/i, /^Gross\s+profit\s+margin\b/i]);
-  mergeRowByLabel(idx, best.periods, 'patMargin', [/^PAT\s+margin\b/i, /^Net\s+profit\s+margin\b/i]);
+  mergeRowByLabel(idx, best.periods, 'patMargin', [
+    /^PAT\s+margin\b/i,
+    /^PATAMI\s+margin\b/i,
+    /^PATMI\s+margin\b/i,
+    /^Net\s+profit\s+margin\b/i,
+    /^Net\s+margin\b/i,
+  ]);
   mergeRatioTables(idx, best.periods);
   mergeEps(idx, best.periods);
   mergeDividends(idx, best.periods);
@@ -865,8 +982,13 @@ function parseFinancialPeriods(idx: DocIndex): FinancialPeriod[] {
 
 /**
  * Fills a single financial row (by label) from anywhere in the document when
- * the chosen P&L table did not already capture it, matching only a row whose
- * column count equals the number of periods.
+ * the chosen P&L table did not already capture it.
+ *
+ * Column count may legitimately differ from the number of P&L periods: a
+ * balance-sheet or ratio table often omits the earliest interim comparative
+ * (e.g. 4 balance-sheet dates against 5 P&L periods). When a row has fewer
+ * numbers than periods, we align by matching the row's own header years to
+ * each period's year, falling back to right-alignment if no header is found.
  */
 function mergeRowByLabel(
   idx: DocIndex,
@@ -878,13 +1000,85 @@ function mergeRowByLabel(
   for (const pattern of patterns) {
     for (const hit of findAllLines(idx, pattern)) {
       const nums = rowNumbers(stripLabelNoise(hit.line));
-      if (nums.length !== periods.length) continue;
-      nums.forEach((v, c) => {
-        (periods[c] as unknown as Record<string, number | null>)[key as string] = v;
-      });
-      return;
+      if (nums.length === 0 || nums.length > periods.length) continue;
+
+      if (nums.length === periods.length) {
+        let filled = false;
+        nums.forEach((v, c) => {
+          if (v !== null) filled = true;
+          (periods[c] as unknown as Record<string, number | null>)[key as string] = v;
+        });
+        if (filled) return;
+        continue;
+      }
+
+      const headerYears = columnYearsAbove(idx, hit.index, nums.length);
+      const targets = mapValuesToPeriods(periods, nums, headerYears);
+      if (targets) {
+        let filled = false;
+        targets.forEach(({ periodIndex, value }) => {
+          if (value !== null) filled = true;
+          (periods[periodIndex] as unknown as Record<string, number | null>)[key as string] = value;
+        });
+        if (filled) return;
+      }
     }
   }
+}
+
+/**
+ * Scans upward for the nearest date-header line carrying a run of year tokens
+ * (the table's column header), returning the trailing `count` years or null.
+ * Balance-sheet tables often place several data rows between the header and a
+ * ratio row, so the search window is generous (~30 lines).
+ */
+function columnYearsAbove(idx: DocIndex, rowIndex: number, count: number): number[] | null {
+  for (let i = rowIndex - 1; i >= Math.max(0, rowIndex - 30); i--) {
+    const combined = `${idx.lines[i]} ${idx.lines[i + 1] ?? ''}`;
+    const years = combined.match(/\b(19|20)\d{2}\b/g);
+    if (years && years.length >= count) {
+      // Only accept genuine year headers, not data rows that happen to contain
+      // a 4-digit number: nearly all large numbers on the line must be years.
+      const bigNums = combined.match(/\b\d{4,}\b/g) ?? [];
+      const yearLike = bigNums.filter((n) => /^(19|20)\d{2}$/.test(n)).length;
+      if (yearLike >= bigNums.length - 1) {
+        return years.slice(years.length - count).map(Number);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Maps a short row of values to P&L periods by year. A balance-sheet "as at"
+ * date for a full year maps to that full financial year (FYE); only when the
+ * sole period for a year is an interim (FPE) does it map there. Falls back to
+ * right-alignment when the header years cannot be read; returns null if a year
+ * matches no period (so the caller skips rather than mis-assigns).
+ */
+function mapValuesToPeriods(
+  periods: FinancialPeriod[],
+  values: (number | null)[],
+  headerYears: number[] | null,
+): { periodIndex: number; value: number | null }[] | null {
+  if (!headerYears || headerYears.length !== values.length) {
+    const offset = periods.length - values.length;
+    return values.map((value, c) => ({ periodIndex: offset + c, value }));
+  }
+  const out: { periodIndex: number; value: number | null }[] = [];
+  const used = new Set<number>();
+  for (let c = 0; c < values.length; c++) {
+    const year = headerYears[c];
+    const candidates = periods
+      .map((p, i) => ({ i, year: p.year, isStub: p.isStub }))
+      .filter((p) => p.year === year && !used.has(p.i));
+    if (candidates.length === 0) return null;
+    const full = candidates.find((p) => !p.isStub);
+    const chosen = (full ?? candidates[candidates.length - 1]).i;
+    used.add(chosen);
+    out.push({ periodIndex: chosen, value: values[c] });
+  }
+  return out;
 }
 
 /**
@@ -915,25 +1109,15 @@ function stripLabelNoise(line: string): string {
     .replace(/\s+/g, ' ');
 }
 
+/**
+ * Reuses the right-aligned / year-matched single-row merge for ratio rows,
+ * which frequently sit in a separate balance-sheet table with one fewer column
+ * than the P&L.
+ */
 function mergeRatioTables(idx: DocIndex, periods: FinancialPeriod[]) {
   for (const spec of RATIO_ROWS) {
-    // Already populated by the main table?
     if (periods.some((p) => p[spec.key] !== null)) continue;
-
-    for (const pattern of spec.patterns) {
-      const hits = findAllLines(idx, pattern);
-      let applied = false;
-      for (const hit of hits) {
-        const nums = rowNumbers(stripLabelNoise(hit.line));
-        if (nums.length !== periods.length) continue;
-        nums.forEach((v, c) => {
-          (periods[c] as unknown as Record<string, number | null>)[spec.key as string] = v;
-        });
-        applied = true;
-        break;
-      }
-      if (applied) break;
-    }
+    mergeRowByLabel(idx, periods, spec.key, spec.patterns);
   }
 }
 
