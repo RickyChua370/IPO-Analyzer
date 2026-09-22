@@ -4,16 +4,19 @@ import { fileURLToPath } from 'node:url';
 import { itemsToPageText } from '../src/lib/textLayout.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SRC = join(__dirname, '..', '..', 'sunmed-test');
+const REPO = join(__dirname, '..', '..');
 const OUT = join(__dirname, '..', 'fixtures');
 const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
 
-const files = readdirSync(SRC).filter((f) => f.toLowerCase().endsWith('.pdf')).sort();
+// Sunway Healthcare parts are named "Sunway Healthcare - Prospectus Part N.pdf".
+const files = readdirSync(REPO)
+  .filter((f) => /^Sunway Healthcare .*\.pdf$/i.test(f))
+  .sort();
 mkdirSync(OUT, { recursive: true });
 
 const allPages = [];
 for (const file of files) {
-  const data = new Uint8Array(readFileSync(join(SRC, file)));
+  const data = new Uint8Array(readFileSync(join(REPO, file)));
   const task = getDocument({ data, useSystemFonts: true });
   const doc = await task.promise;
   console.log(`${file}: ${doc.numPages} pages`);
@@ -30,4 +33,4 @@ writeFileSync(
   join(OUT, 'sunmed-pages.txt'),
   allPages.map((p, i) => `\n===== PAGE ${i + 1} =====\n${p}`).join('\n'),
 );
-console.log(`Wrote ${allPages.length} pages`);
+console.log(`Wrote ${allPages.length} pages -> sunmed`);

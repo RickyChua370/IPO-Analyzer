@@ -18,7 +18,8 @@
     "fixture:99sm": "node --experimental-strip-types scripts/extract-99sm.mjs",
     "fixture:sunmed": "node --experimental-strip-types scripts/extract-sunmed.mjs",
     "test:restng": "node --experimental-strip-types scripts/test-restng.mjs",
-    "fixture:restng": "node --experimental-strip-types scripts/extract-restng.mjs"
+    "fixture:restng": "node --experimental-strip-types scripts/extract-restng.mjs",
+    "fixtures:all": "npm run fixture && npm run fixture:99sm && npm run fixture:sunmed && npm run fixture:restng"
   },
   "dependencies": {
     "pdfjs-dist": "^6.3.289",

@@ -34,10 +34,12 @@ jobs:
       - name: Type-check and build
         run: npm run build
 
-      # The parser regression suite needs the fixture, which is generated from
-      # the prospectus PDFs in the repo root.
-      - name: Generate fixture and run tests
-        run: npm run fixture && npm test
+      # The parser regression suites are generated from the prospectus PDFs
+      # committed in the repo root (one fixture per company). Each fixture test
+      # skips gracefully if its JSON is absent, so this stays green even if a
+      # company's PDFs are later removed.
+      - name: Generate fixtures and run tests
+        run: npm run fixtures:all && npm test
 
       - uses: actions/upload-pages-artifact@v3
         with:
