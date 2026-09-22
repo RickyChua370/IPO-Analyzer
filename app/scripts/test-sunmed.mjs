@@ -42,6 +42,19 @@ check('marketCap', parsed.marketCap.value, 16700000000);
 check('listingDate', parsed.listingDate.value, '18 March 2026');
 check('closeDate', parsed.closeDate.value, '5 March 2026');
 
+console.log('\n--- Use of proceeds (header "Description of use of proceeds") ---');
+for (const u of parsed.proceedsUses) {
+  console.log(`  ${String(u.category).padEnd(14)} ${u.label.slice(0, 44).padEnd(45)} ${String(u.amount).padStart(9)} ${String(u.pct).padStart(6)}%`);
+}
+check('proceeds line items', parsed.proceedsUses.length, 3);
+check('proceeds total (RM’000)', parsed.proceedsTotal.value, 833762);
+const capex = parsed.proceedsUses.find((u) => /Capital expenditure/i.test(u.label));
+check('capex amount', capex?.amount, 554050);
+check('capex classified growth', capex?.category, 'growth');
+check('capex label absorbed wrap', /existing hospitals/i.test(capex?.label ?? ''), true);
+const sukuk = parsed.proceedsUses.find((u) => /Sukuk/i.test(u.label));
+check('sukuk redemption classified debt', sukuk?.category, 'debt');
+
 console.log('\n--- Financial periods ---');
 console.log(['period', 'revenue', 'GP', 'PBT', 'PAT', 'GP%', 'PAT%', 'EPS', 'gear', 'curr'].map((h) => String(h).padStart(10)).join(''));
 for (const p of parsed.periods) {

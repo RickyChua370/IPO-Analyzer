@@ -502,7 +502,13 @@ function classifyProceeds(label: string): ProceedsUse['category'] {
   const l = label.toLowerCase();
   if (/listing\s+expense|issue\s+expense|estimated\s+expenses|defray\s+(?:the\s+)?(?:fees|expenses)|fees\s+and\s+expenses/.test(l))
     return 'expenses';
-  if (/repay|repayment|reduction\s+of\s+(?:bank\s+)?borrowing|settle.*borrowing/.test(l)) return 'debt';
+  if (
+    /repay|repayment|reduction\s+of\s+(?:bank\s+)?borrowing|settle.*borrowing|redemption\s+of\s+(?:the\s+)?(?:sukuk|bond|notes?|loan|debt|borrowing)|pare\s+down\s+(?:debt|borrowing)|paring\s+down/.test(
+      l,
+    )
+  ) {
+    return 'debt';
+  }
   if (/working\s+capital/.test(l)) return 'working_capital';
   if (
     /machinery|equipment|capital\s+expenditure|capex|expansion|expenditure|new\s+(?:factory|plant|outlet|branch|dc|distribution)|establishment\s+of|network\s+of\s+outlets|software|automation|renovation|construction\s+of|acquisition|research|development|fleet|vehicle|truck|upgrad|store|outlet/.test(
@@ -529,10 +535,20 @@ function classifyProceeds(label: string): ProceedsUse['category'] {
  * RM'000 so downstream maths is unit-consistent regardless of the source.
  */
 function parseProceeds(idx: DocIndex): { uses: ProceedsUse[]; total: Field<number> } {
-  const header = findLine(
-    idx,
-    /(Description\s+of\s+utilisation|Details?\s+of\s+use\s+of\s+proceeds|Details?\s+of\s+utilisation|Purpose\s+of\s+utilisation)/i,
-  );
+  // Header wording varies widely across prospectuses:
+  //   "Description of utilisation"            (SLGC)
+  //   "Details of use of proceeds"            (99 Speed Mart)
+  //   "Description of use of proceeds"        (Sunway)
+  //   "Details/Purpose of utilisation", "Proposed utilisation", etc.
+  // Match any "<Description|Details|Purpose> of (use of proceeds|utilisation)".
+  const header =
+    findLine(
+      idx,
+      /(?:Description|Details?|Purpose|Proposed)\s+(?:of\s+)?(?:use\s+of\s+proceeds|utilisation|utilization)/i,
+    ) ??
+    // Fallback: a line that is just the column headers "... RM'000 %" following
+    // a "use of proceeds" mention.
+    findLine(idx, /use\s+of\s+proceeds\b[^%]*\bRM\s*['’]?\s*(?:000|million)?\s*%?\s*$/i);
   if (!header) return { uses: [], total: missing<number>() };
 
   // Determine the amount unit from the header region (default RM'000).
