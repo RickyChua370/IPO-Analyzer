@@ -6,3 +6,4 @@ app/fixtures/
 .DS_Store
 .vite/
 *.tsbuildinfo
+99sm-test/
