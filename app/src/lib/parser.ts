@@ -201,36 +201,55 @@ function parseProspectusDate(idx: DocIndex): Field<string> {
 
 function parseBusinessDescription(idx: DocIndex): Field<string> {
   // The principal-activity sentence is phrased several ways across prospectuses.
+  // "Through our subsidiaries, {we are|our Group is} principally involved in X"
+  // is the canonical form; the subject between the comma and "principally" may
+  // be "we are", "our Group is", "the Group is", etc.
   const patterns: RegExp[] = [
-    /Through our subsidiar(?:y|ies),?\s+we are\s+principally involved in\s+(?:the\s+)?([^.]{10,300}?)\./i,
-    /we are\s+principally involved in\s+(?:the\s+)?([^.]{10,300}?)\./i,
+    /Through our (?:Subsidiar(?:y|ies)|Group)[^.]{0,40}?principally involved in\s+(?:the\s+)?([^.]{10,300}?)\./i,
+    /(?:we are|our Group is|the Group is)\s+principally involved in\s+(?:the\s+)?([^.]{10,300}?)\./i,
     // "...involved in the retailing of FMCG across Malaysia" (99 Speed Mart)
     /(?:chain\s+of\s+)?[a-z-]+\s+outlets?\s+involved\s+in\s+(?:the\s+)?([^.]{10,200}?)\./i,
-    /\bengaged\s+in\s+(?:the\s+)?([^.]{10,300}?)\./i,
     /principal\s+activit(?:y|ies)\s+(?:of\s+our\s+Group\s+)?(?:is|are|comprises?)\s+(?:that\s+of\s+)?(?:an?\s+)?([^.]{10,300}?)\./i,
+    /\b(?:we are|our Group is)\s+(?:principally\s+)?engaged in\s+(?:the\s+)?([^.]{10,300}?)\./i,
     // "we operate ... 'Speedmart' chain of mini-market outlets" — capture role
     /we\s+(?:operate|own\s+and\s+operate)\s+(?:a\s+|the\s+)?([^.]{10,200}?)\./i,
   ];
   for (let k = 0; k < patterns.length; k++) {
     const hit = findProse(idx, patterns[k]);
-    if (hit && hit.match[1] && hit.match[1].trim().length >= 10) {
-      return field(cleanProse(hit.match[1]), {
-        page: hit.page,
-        confidence: k === 0 ? 'high' : 'medium',
-      });
+    const captured = hit?.match[1]?.trim();
+    // Reject captures that are clearly MD&A/financial prose, not an activity.
+    if (
+      hit &&
+      captured &&
+      captured.length >= 10 &&
+      !/\bFYE\b|\brevenue\b|\bin line with\b|\bincrease\b|\bdecrease\b|\bmargin\b/i.test(captured)
+    ) {
+      return field(cleanProse(captured), { page: hit.page, confidence: k === 0 ? 'high' : 'medium' });
     }
   }
   return missing<string>();
 }
 
 function cleanProse(s: string): string {
-  return s
-    .replace(/\s+/g, ' ')
-    .replace(/\s+([,.])/g, '$1')
-    // Drop a dangling lead-in left by list-style activities ("...following: (a) ...").
-    .replace(/^(?:the\s+)?following:?\s*/i, '')
-    .replace(/^\([a-z]\)\s*/i, '')
-    .trim();
+  return (
+    s
+      .replace(/\s+/g, ' ')
+      .replace(/\s+([,.])/g, '$1')
+      // Drop a dangling lead-in left by list-style activities ("...following: (a) ...").
+      .replace(/^(?:the\s+)?following:?\s*/i, '')
+      .replace(/^\([a-z]\)\s*/i, '')
+      // Cut page-break/footer artifacts that bleed in from the flattened text
+      // ("... massage services; 4 4 Registration No. 2021...").
+      .replace(/\s+\d{1,4}\s+\d{1,4}\s+Registration\s+No\.?.*$/i, '')
+      .replace(/\s+Registration\s+No\.?.*$/i, '')
+      // Trailing bare page numbers ("... services; 4 4").
+      .replace(/;?\s+\d{1,4}(\s+\d{1,4})?\s*$/, '')
+      // Collapse an immediately-repeated word from PDF layout duplication
+      // ("digital transformationtransformation" / "solutions solutions").
+      .replace(/\b(\w{5,})\1\b/gi, '$1')
+      .replace(/\b(\w{4,})\s+\1\b/gi, '$1')
+      .trim()
+  );
 }
 
 /**
@@ -526,7 +545,7 @@ function classifyProceeds(label: string): ProceedsUse['category'] {
   }
   if (/working\s+capital/.test(l)) return 'working_capital';
   if (
-    /machinery|equipment|capital\s+expenditure|capex|expansion|expenditure|new\s+(?:factory|plant|outlet|branch|dc|distribution)|establishment\s+of|network\s+of\s+outlets|software|automation|renovation|construction\s+of|acquisition|research|development|fleet|vehicle|truck|upgrad|store|outlet/.test(
+    /machinery|equipment|capital\s+expenditure|capex|expansion|expenditure|\b(?:new|additional)\b.*\b(?:factory|plant|outlet|branch|dc|distribution|office|hq|headquarter|lab|centre|center|site|store)|\b(?:office|hq|headquarter|factory|warehouse|laborator|lab)\b|setting[\s-]*up|set[\s-]*up|establish|network\s+of\s+outlets|software|automation|digital|renovation|refurbish|construction\s+of|acquisition|research|development|\br&d\b|fleet|vehicle|truck|upgrad|store|outlet|strategic\s+growth|growth\s+initiative|marketing|branding|promotional|geographical\s+expansion|data\s+(?:analytics|cent)|\bsoc\b|\bai\b/.test(
       l,
     )
   ) {
@@ -560,14 +579,30 @@ function parseProceeds(idx: DocIndex): { uses: ProceedsUse[]; total: Field<numbe
   // (e.g. "2.9 UTILISATION OF PROCEEDS"), which is not the table. So we accept
   // a bare "Utilisation of proceeds" line only when it also carries the table's
   // column markers (RM'000 / RM million and/or %), which the heading never has.
+  // Header wording seen so far:
+  //   "Description of utilisation | RM'000 | % | timeframe"   (SLGC)
+  //   "Details of use of proceeds | timeframe | RM million | %"  (99 Speed Mart)
+  //   "Description of use of proceeds | RM'000 | %"           (Sunway)
+  //   "Utilisation of proceeds | RM'000 | % | timeframe"      (RNG Tech)
+  //   "No. Description (RM'000) proceeds Listing"             (SRKK AI)
+  //   "Purposes | RM'000 | % | Listing date"                 (Pioneer)
+  //
+  // The label column may be titled "Description", "Details", "Purpose(s)",
+  // "Particulars", "Utilisation of proceeds", etc. To avoid matching prose or
+  // the section heading, we only accept a line that ALSO carries the table's
+  // column markers — a units token (RM'000 / RM million) and/or a "%"/"proceeds"
+  // column — and is short enough to be a header row, not a sentence.
   const isColumnHeader = (line: string): boolean => {
-    const hasProceedsLabel =
-      /(?:Description|Details?|Purpose|Proposed)\s+(?:of\s+)?(?:use\s+of\s+proceeds|utilisation|utilization)/i.test(
-        line,
-      ) || /^Utilisation\s+of\s+proceeds\b/i.test(line);
-    if (!hasProceedsLabel) return false;
-    // Require a units/percent column marker so we skip the plain section title.
-    return /\bRM\s*['’]?\s*(?:000|million|mil|m)\b|%/i.test(line);
+    const hasLabelWord =
+      /(?:Description|Details?|Purpose|Purposes|Particulars|Proposed)\b/i.test(line) ||
+      /^\s*(?:No\.?\s+)?(?:Description|Purpose|Particulars)\b/i.test(line) ||
+      /^Utilisation\s+of\s+proceeds\b/i.test(line);
+    if (!hasLabelWord) return false;
+    const hasUnitMarker = /\bRM\s*['’]?\s*(?:000|million|mil|m)\b/i.test(line);
+    const hasPctOrProceedsCol = /%|\bproceeds\b/i.test(line);
+    if (!hasUnitMarker && !hasPctOrProceedsCol) return false;
+    // Reject long prose lines (a real column-header row is short).
+    return line.trim().split(/\s+/).length <= 14;
   };
 
   let header: LineHit | null = null;
@@ -598,15 +633,18 @@ function parseProceeds(idx: DocIndex): { uses: ProceedsUse[]; total: Field<numbe
   let total: Field<number> = missing<number>();
 
   // Non-capturing so the group indices in the row patterns below stay stable.
+  // Timeframes appear as "Within 12 months", a bare "24 months" / "61 months"
+  // / "1 month", "Immediately", "Upon Listing", or "By Aug 2026".
   const TIMEFRAME =
-    /(?:Within\s+\d+\s*\w+|Immediate\w*|Upon\s+[A-Za-z ]+?|By\s+\w+\s+\d{4})/i;
+    /(?:Within\s+\d+\s*\w+|\d+\s*(?:months?|years?|weeks?)|Immediate\w*|Upon\s+[A-Za-z ]+?|By\s+\w+\s+\d{4})/i;
 
   for (let i = header.index + 1; i < Math.min(header.index + 45, idx.lines.length); i++) {
     const line = idx.lines[i];
     if (/^Notes?:/i.test(line)) break;
 
-    // Total row (amount then optional pct).
-    const tm = line.match(/^Total\s+([\d,]+(?:\.\d+)?)\s+([\d.]+)?\s*$/i);
+    // Total row: "Total 16,390 100.0" or "Total Public Issue proceeds 20,480
+    // 100.00" — allow words between "Total" and the figures.
+    const tm = line.match(/^Total\b[^\d]*?([\d,]+(?:\.\d+)?)\s+([\d.]+)?\s*$/i);
     if (tm) {
       const t = toNumber(tm[1]);
       total = field(t === null ? null : t * scale, { page: idx.linePages[i], raw: line });
@@ -1255,6 +1293,9 @@ function parseOrderBook(idx: DocIndex): { value: Field<number>; raw: Field<strin
     /(?:total\s+)?unbilled\s+contract\s+value[^.]{0,80}?stood\s+at\s+(?:approximately\s+)?RM\s?([\d.,]+)\s*(billion|million)?/i,
     /order\s+book[^.]{0,120}?stood\s+at\s+(?:approximately\s+)?RM\s?([\d.,]+)\s*(billion|million)?/i,
     /unbilled\s+contract\s+value\s+of[^.]{0,80}?RM\s?([\d.,]+)\s*(billion|million)?/i,
+    // "we have an unbilled order book amounting to RM50.43 million" (Pioneer)
+    /(?:unbilled\s+)?order\s+book\s+(?:of\s+|amounting\s+to\s+)(?:approximately\s+)?RM\s?([\d.,]+)\s*(billion|million)?/i,
+    /unbilled\s+(?:contract\s+value|order\s+book)\s+amounting\s+to\s+(?:approximately\s+)?RM\s?([\d.,]+)\s*(billion|million)?/i,
   ];
 
   for (const re of patterns) {
