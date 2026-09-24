@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "npm run test:parser && npm run test:99sm && npm run test:sunmed && npm run test:restng && npm run test:srkk && npm run test:pioneer && npm run test:render",
+    "test": "npm run test:parser && npm run test:99sm && npm run test:sunmed && npm run test:restng && npm run test:srkk && npm run test:pioneer && npm run test:ecosys && npm run test:render",
     "test:parser": "node --experimental-strip-types scripts/test-parser.mjs",
     "test:99sm": "node --experimental-strip-types scripts/test-99sm.mjs",
     "test:sunmed": "node --experimental-strip-types scripts/test-sunmed.mjs",
@@ -19,11 +19,13 @@
     "fixture:sunmed": "node --experimental-strip-types scripts/extract-sunmed.mjs",
     "test:restng": "node --experimental-strip-types scripts/test-restng.mjs",
     "fixture:restng": "node --experimental-strip-types scripts/extract-restng.mjs",
-    "fixtures:all": "npm run fixture && npm run fixture:99sm && npm run fixture:sunmed && npm run fixture:restng && npm run fixture:srkk && npm run fixture:pioneer",
+    "fixtures:all": "npm run fixture && npm run fixture:99sm && npm run fixture:sunmed && npm run fixture:restng && npm run fixture:srkk && npm run fixture:pioneer && npm run fixture:ecosys",
     "test:srkk": "node --experimental-strip-types scripts/test-srkk.mjs",
     "test:pioneer": "node --experimental-strip-types scripts/test-pioneer.mjs",
     "fixture:srkk": "node --experimental-strip-types scripts/extract-srkk.mjs",
-    "fixture:pioneer": "node --experimental-strip-types scripts/extract-pioneer.mjs"
+    "fixture:pioneer": "node --experimental-strip-types scripts/extract-pioneer.mjs",
+    "test:ecosys": "node --experimental-strip-types scripts/test-ecosys.mjs",
+    "fixture:ecosys": "node --experimental-strip-types scripts/extract-ecosys.mjs"
   },
   "dependencies": {
     "pdfjs-dist": "^6.3.289",

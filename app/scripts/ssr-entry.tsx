@@ -236,5 +236,28 @@ check(
   noObMetrics.relevance.orderBook,
 );
 
+// --- Ecosys: name parsing + "no order book" disclaimer -------------------
+// Guards the regression where the cover-page name ran into boilerplate
+// ("Ecosys In Connection With Thebursa Malaysia Securities Berhad") and the
+// "we do not maintain an order book" sentinel leaking into the UI.
+try {
+  const ecoFx = JSON.parse(readFileSync('fixtures/ecosys.json', 'utf8')) as {
+    files: string[];
+    pages: string[];
+  };
+  const eco = parseProspectus(ecoFx.pages, ecoFx.files);
+  const ecoMetrics = analyse(eco);
+  check('ecosys: company name correct', eco.companyName.value === 'Ecosys (Malaysia) Berhad', String(eco.companyName.value));
+  check('ecosys: order book disclaimed → not applicable', ecoMetrics.relevance.orderBook === 'not_applicable', ecoMetrics.relevance.orderBook);
+  const ecoHtml = renderToStaticMarkup(
+    <Dashboard analysis={{ parsed: eco, metrics: ecoMetrics }} onEdit={() => {}} onSave={() => {}} saved={false} />,
+  );
+  check('ecosys: no order-book sentinel leaks into markup', !ecoHtml.includes('__NOT_MAINTAINED__'));
+  check('ecosys: proceeds rendered', /where the money goes/i.test(ecoHtml));
+  check('ecosys: no boilerplate name in markup', !ecoHtml.includes('In Connection With'));
+} catch {
+  console.log('SKIP  ecosys fixture not present');
+}
+
 console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
 process.exit(fail > 0 ? 1 : 0);

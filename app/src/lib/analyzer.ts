@@ -309,12 +309,19 @@ function computeRelevance(p: ParsedProspectus): RelevanceProfile {
     projectBased ||
     /manufactur|fabricat|distribut|wholesale|supply|b2b|original equipment|oem|contract/.test(text);
 
+  // The prospectus may explicitly state it keeps no order book (flagged by the
+  // parser). That is the strongest signal — treat as not-applicable even for a
+  // project/manufacturing business.
+  const orderBookDisclaimed = p.orderBookRaw.value === '__NOT_MAINTAINED__';
+
   const relevance: RelevanceProfile = {
     orderBook: p.orderBook.value !== null
       ? 'present'
-      : projectBased
-        ? 'missed'
-        : 'not_applicable',
+      : orderBookDisclaimed
+        ? 'not_applicable'
+        : projectBased
+          ? 'missed'
+          : 'not_applicable',
     customerConcentration: (p.customerConcentration.value?.length ?? 0) > 0
       ? 'present'
       : concentrationLikely && !massConsumer

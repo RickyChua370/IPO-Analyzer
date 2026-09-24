@@ -115,34 +115,56 @@ function findProse(idx: DocIndex, re: RegExp): { match: RegExpMatchArray; page: 
 // ---------------------------------------------------------------------------
 
 function parseCompanyName(idx: DocIndex): Field<string> {
-  // The cover/notice page names the company followed by BERHAD, often with an
-  // abbreviation in quotes: 'SLGC BERHAD ("SLGC" OR THE "COMPANY")'. The name
-  // frequently wraps across a line break, so match against the newline-
-  // flattened text and allow the name to span it.
+  // Characters allowed inside a company name: letters, digits, spaces, and the
+  // punctuation that appears in real names — "&", ".", "'", "-", and
+  // parentheses ("Ecosys (Malaysia) Berhad").
+  const NAME = "[A-Z0-9(][A-Z0-9\\s&.'()-]";
+
+  // Strongest signal: the cover page introduces the company as
+  //   "PROSPECTUS OF <NAME> BERHAD ("ABBREV" OR THE "COMPANY") ..."
+  // Anchoring the match to end at the quoted abbreviation stops it from
+  // running past BERHAD into body boilerplate like "...in connection with the
+  // Bursa Malaysia Securities Berhad". The name may wrap a line and may begin
+  // with a digit ("99 SPEED MART") or a parenthesis.
+  const withAbbrev = findProse(
+    idx,
+    new RegExp(
+      `PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+BERHAD)\\s*\\(\\s*["“']`,
+      'i',
+    ),
+  );
+  if (withAbbrev) {
+    return field(tidyName(withAbbrev.match[1]), { page: withAbbrev.page, raw: withAbbrev.match[0] });
+  }
+
+  // Next: "PROSPECTUS OF <NAME> BERHAD DATED <date>" — bounded by DATED.
+  const beforeDated = findProse(
+    idx,
+    new RegExp(`PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+BERHAD)\\s+DATED\\b`, 'i'),
+  );
+  if (beforeDated) {
+    return field(tidyName(beforeDated.match[1]), { page: beforeDated.page, raw: beforeDated.match[0] });
+  }
+
+  // A standalone all-caps cover line that is exactly the name (the logo line,
+  // e.g. "ECOSYS (MALAYSIA) BERHAD" on its own line). Reject lines that carry
+  // connective words which betray a sentence, not a name.
+  const line = findLine(
+    idx,
+    new RegExp(`^(${NAME}{2,70}?\\s+BERHAD)\\s*$`, 'i'),
+  );
+  if (line && !/\b(in connection|listing|securities|comprising|dated|offer|public issue)\b/i.test(line.match[1])) {
+    return field(tidyName(line.match[1]), { page: line.page, confidence: 'medium' });
+  }
+
+  // Weaker fallback: "PROSPECTUS OF <NAME> BERHAD" without the guards above.
   const hit = findProse(
     idx,
-    // The name may begin with a digit ("99 SPEED MART ...") and wrap a line.
-    /(?:ELECTRONIC\s+)?PROSPECTUS\s+OF\s+([A-Z0-9][A-Z0-9\s&.'-]{2,80}?\s+BERHAD)\b/i,
+    new RegExp(`(?:ELECTRONIC\\s+)?PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+BERHAD)\\b`, 'i'),
   );
-  if (hit) {
-    return field(tidyName(hit.match[1]), { page: hit.page, raw: hit.match[0] });
+  if (hit && !/\b(in connection|listing on|securities berhad)\b/i.test(hit.match[1])) {
+    return field(tidyName(hit.match[1]), { page: hit.page, confidence: 'medium', raw: hit.match[0] });
   }
-
-  // "...OF UP TO n ORDINARY SHARES IN <NAME> BERHAD" (offer-summary phrasing).
-  const inShares = findProse(
-    idx,
-    /ORDINARY\s+SHARES\s+IN\s+([A-Z0-9][A-Z0-9\s&.'-]{2,80}?\s+BERHAD)\b/i,
-  );
-  if (inShares) {
-    return field(tidyName(inShares.match[1]), { page: inShares.page, confidence: 'medium' });
-  }
-
-  // Fallback: first standalone all-caps line ending in BERHAD.
-  const line = findLine(idx, /^([A-Z][A-Z0-9\s&.'-]{2,60}\s+BERHAD)\b/);
-  if (line) return field(tidyName(line.match[1]), { page: line.page, confidence: 'medium' });
-
-  const anyBhd = findProse(idx, /\b([A-Z][A-Za-z0-9\s&.'-]{2,50}\s+Berhad)\b/);
-  if (anyBhd) return field(tidyName(anyBhd.match[1]), { page: anyBhd.page, confidence: 'low' });
 
   return missing<string>();
 }
@@ -161,13 +183,20 @@ function tidyName(s: string): string {
     .split(' ')
     .map((word) => {
       if (/^\d+$/.test(word)) return word; // numeric token, e.g. "99"
+      // Split off any leading/trailing punctuation (e.g. "(MALAYSIA)") so the
+      // casing rules apply to the inner word and the brackets are preserved.
+      const m = word.match(/^([^A-Za-z0-9]*)([A-Za-z0-9&.'-]*)([^A-Za-z0-9]*)$/);
+      const lead = m ? m[1] : '';
+      const core = m ? m[2] : word;
+      const trail = m ? m[3] : '';
       // Preserve acronyms/initialisms: all-caps tokens that are either very
       // short or vowel-less (SLGC, YTL, MBSB, DKSH, KPJ). Title-case ordinary
-      // words that merely appear in full caps on the cover ("SPEED", "MART").
+      // words that merely appear in full caps on the cover ("SPEED", "MART",
+      // "MALAYSIA").
       const isAcronym =
-        /^[A-Z][A-Z0-9&.-]{1,4}$/.test(word) && (word.length <= 3 || !/[AEIOU]/.test(word));
-      if (isAcronym) return word;
-      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        /^[A-Z][A-Z0-9&.-]{1,4}$/.test(core) && (core.length <= 3 || !/[AEIOU]/.test(core));
+      const cased = isAcronym ? core : core.charAt(0).toUpperCase() + core.slice(1).toLowerCase();
+      return `${lead}${cased}${trail}`;
     })
     .join(' ');
 }
@@ -1312,6 +1341,21 @@ function parseOrderBook(idx: DocIndex): { value: Field<number>; raw: Field<strin
       raw: field(`RM${hit.match[1]}${unit ? ` ${unit}` : ''}`, { page: hit.page }),
     };
   }
+
+  // Some prospectuses explicitly state they keep no order book, e.g.
+  // "Due to the nature of our business, we do not maintain an order book...".
+  // Record this so relevance can mark order book as not-applicable (not a gap).
+  const none = findProse(
+    idx,
+    /(?:we\s+)?do\s+not\s+(?:maintain|have|keep)\s+(?:an?\s+)?order\s+book/i,
+  );
+  if (none) {
+    return {
+      value: missing<number>(),
+      raw: field('__NOT_MAINTAINED__', { page: none.page, raw: none.match[0] }),
+    };
+  }
+
   return { value: missing<number>(), raw: missing<string>() };
 }
 
