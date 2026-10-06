@@ -254,10 +254,37 @@ function parseBusinessDescription(idx: DocIndex): Field<string> {
       captured.length >= 10 &&
       !/\bFYE\b|\brevenue\b|\bin line with\b|\bincrease\b|\bdecrease\b|\bmargin\b/i.test(captured)
     ) {
-      return field(cleanProse(captured), { page: hit.page, confidence: k === 0 ? 'high' : 'medium' });
+      const enriched = enrichVagueActivity(idx, captured);
+      return field(cleanProse(enriched), { page: hit.page, confidence: k === 0 ? 'high' : 'medium' });
     }
   }
   return missing<string>();
+}
+
+/**
+ * Some issuers state the activity as a generic umbrella ("the ICT solutions
+ * sector") and immediately enumerate the real segments. In that case the
+ * umbrella alone is uninformative, so if a "segmented into … i. … ii. …" list
+ * follows, fold the segment leads into the description.
+ */
+function enrichVagueActivity(idx: DocIndex, captured: string): string {
+  // Only enrich short, umbrella-style captures ending in "sector"/"industry".
+  if (!/\b(sector|industry|business)\s*$/i.test(captured) || captured.length > 60) {
+    return captured;
+  }
+  const seg = findProse(
+    idx,
+    /segmented\s+into\s+the\s+following\s+(?:core\s+)?(?:principal\s+)?(?:business\s+)?(?:activities|segments)\s*:?\s*([^]{20,500})/i,
+  );
+  if (!seg) return captured;
+  const items = seg.match[1].match(
+    /(?:^|\s)(?:[ivx]{1,4}\.|\([ivx]{1,4}\))\s+([a-z][^.;–-]{6,70})/gi,
+  );
+  if (!items || items.length < 2) return captured;
+  const leads = items
+    .map((s) => s.replace(/^[\s]*(?:[ivx]{1,4}\.|\([ivx]{1,4}\))\s+/i, '').replace(/\s+[–-]\s*$/, '').trim())
+    .filter(Boolean);
+  return `${captured.replace(/\s+$/, '')}: ${leads.join('; ')}`;
 }
 
 function cleanProse(s: string): string {
@@ -469,22 +496,31 @@ function parseAllocations(idx: DocIndex): {
       }
       if (/^(Enlarged|IPO\s+Price|Market\s+capitalisation|Notes?:)/i.test(line)) break;
 
-      // A data row: label followed by shares, amount, percentage.
-      const m = line.match(/^(.+?)\s+([\d,]{5,})\s+([\d,]{4,})\s+([\d.]+)\s*$/);
+      // A data row. Two column layouts occur:
+      //   4-col: "label  shares  amountRM  pct"   (most prospectuses)
+      //   3-col: "label  shares  pct"             (e.g. RedPlanet — no RM
+      //          amount column; rows may carry a "(i)"/"•" list prefix)
+      const m4 = line.match(/^(.+?)\s+([\d,]{5,})\s+([\d,]{4,})\s+([\d.]+)\s*$/);
+      const m3 = m4 ? null : line.match(/^(.+?)\s+([\d,]{5,})\s+([\d.]+)\s*$/);
+      const m = m4 ?? m3;
       if (!m) continue;
-      const label = m[1].replace(/^[-–•]\s*/, '').replace(/\s+/g, ' ').trim();
-      if (/^Total/i.test(label)) continue;
+      const label = m[1]
+        .replace(/^\((?:[a-z]|[ivx]{1,4})\)\s*/i, '') // leading (i)/(a) marker
+        .replace(/^[-–•]\s*/, '') // leading bullet
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (/^Total/i.test(label) || label.length < 3) continue;
 
       allocations.push({
         label,
         tranche,
         shares: toNumber(m[2]),
-        amountRM: toNumber(m[3]),
-        pctOfCapital: toNumber(m[4]),
+        amountRM: m4 ? toNumber(m4[3]) : null,
+        pctOfCapital: m4 ? toNumber(m4[4]) : toNumber(m3![3]),
         isRetailBallot:
           tranche === 'public_issue' &&
-          /public\s+investor|Malaysian\s+Public/i.test(label) &&
-          !/placement/i.test(label),
+          /public\s+investor|Malaysian\s+Public|Non-Bumiputera|^Bumiputera$/i.test(label) &&
+          !/placement|MITI|investors?\b/i.test(label),
       });
     }
   }
@@ -1500,11 +1536,22 @@ function parsePeople(idx: DocIndex): { directors: Person[]; management: Person[]
   const directors: Person[] = [];
   const management: Person[] = [];
 
-  const dirAnchor = findLine(idx, /^Directors\s*$/);
-  const mgmtAnchor = findLine(idx, /^Key\s+senior\s+management\s*$/i);
+  // Section headings for the two groups. Some prospectuses label them with a
+  // roman-numeral marker ("(i) Directors", "(ii) Key Senior Management").
+  const dirAnchor =
+    findLine(idx, /^Directors\s*$/) ?? findLine(idx, /^\((?:i|a)\)\s+Directors\s*$/i);
+  const mgmtAnchor =
+    findLine(idx, /^Key\s+senior\s+management\s*$/i) ??
+    findLine(idx, /^\((?:ii|b)\)\s+Key\s+Senior\s+Management\s*$/i);
 
+  // A people row is "<Name> <Designation>". Designations vary widely, so the
+  // matcher accepts a composite title that ends in a recognised role word and
+  // may carry a leading qualifier (Independent / Non-Executive / Executive /
+  // Group / Senior) and a slashed or comma'd second title
+  // ("Executive Director/Managing Director", "Chief Executive Officer, GIS
+  // Group", "Head of Software Solutions", "Group Chief Financial Officer").
   const ROLE =
-    /^(.+?)\s+((?:Independent\s+)?(?:Non-Executive\s+)?(?:Executive\s+)?(?:Managing\s+Director|Chairman|Director|Chief\s+\w+\s+Officer|General\s+Manager|Project\s+Director|Contract\s+Director|Chief\s+Financial\s+Officer))\s*$/i;
+    /^(.+?)\s+((?:Independent\s+|Non-Independent\s+|Non-Executive\s+|Executive\s+|Senior\s+|Group\s+|Deputy\s+)*(?:Managing\s+Director|Chairman|Chief\s+\w+(?:\s+\w+)?\s+Officer|Chief\s+Executive\s+Officer|General\s+Manager|[A-Z][a-z]+\s+Director|Director|Head\s+of\s+[A-Z][\w &/-]+)(?:\s*[/,]\s*[A-Z][\w &/.-]+?)*)\s*$/;
 
   const collect = (start: number, stopAt: number, into: Person[]) => {
     for (let i = start; i < stopAt && i < idx.lines.length; i++) {
@@ -1516,8 +1563,10 @@ function parsePeople(idx: DocIndex): { directors: Person[]; management: Person[]
       into.push({
         name,
         role,
-        isIndependent: /independent/i.test(role),
-        isExecutive: /managing|executive/i.test(role) && !/non-executive/i.test(role),
+        // "Non-Independent" must not count as independent, and "Non-Executive"
+        // must not count as executive — strip the negated forms before testing.
+        isIndependent: /\bindependent\b/i.test(role.replace(/non-independent/gi, '')),
+        isExecutive: /\b(managing|executive)\b/i.test(role.replace(/non-executive/gi, '')),
       });
     }
   };
@@ -1705,7 +1754,7 @@ function findRealSectionHeading(idx: DocIndex, re: RegExp): LineHit | null {
     const nextIsTocEntry = after.some((l) => /^\d+(?:\.\d+)*\s+[A-Z].*\s+\d{1,3}\s*$/.test(l));
     const hasBodyOrItem = after.some(
       (l) =>
-        /^\(?[a-j]\)/.test(l.trim()) || // list item
+        /^\((?:[a-j]|[ivx]{1,4})\)/i.test(l.trim()) || // (a) or (i) list item
         /^\d+\.\d+\.\d+\s+[A-Za-z]/.test(l.trim()) || // numbered sub-item
         /^(?:Our|We|The|Through)\b/.test(l.trim()) || // intro prose
         /are\s+(?:summarised|as\s+follows)/i.test(l), // "… are as follows:"
@@ -1725,7 +1774,7 @@ function findRealSectionHeading(idx: DocIndex, re: RegExp): LineHit | null {
 function parseBusinessModel(idx: DocIndex): Field<string> {
   const anchor =
     findRealSectionHeading(idx, /^3\.\d+\s+OUR\s+BUSINESS\s*$/i) ??
-    findRealSectionHeading(idx, /^3\.\d+\s+PRINCIPAL\s+BUSINESS\s+ACTIVITIES(?:\s+AND\s+SERVICES)?\s*$/i) ??
+    findRealSectionHeading(idx, /^3\.\d+\s+(?:OUR\s+BACKGROUND\s+INFORMATION\s+AND\s+)?PRINCIPAL\s+(?:BUSINESS\s+)?ACTIVIT(?:Y|IES)(?:\s+AND\s+SERVICES)?\s*$/i) ??
     findRealSectionHeading(idx, /^3\.\d+\s+OUR\s+GROUP\s*$/i);
   if (!anchor) return missing<string>();
 
@@ -1738,6 +1787,31 @@ function parseBusinessModel(idx: DocIndex): Field<string> {
     buf.push(line);
   }
   const text = buf.join(' ').replace(/\s+/g, ' ');
+
+  // Some issuers (e.g. RedPlanet) state the activity and then enumerate the
+  // core segments as a list: "… principally involved in the ICT solutions
+  // sector. Our Group's business is segmented into the following core
+  // principal activities: i. provision of … ; ii. provision of … ; iii. …".
+  // The lead sentence alone ("… the ICT solutions sector") is uninformative,
+  // so when the segment list is present, fold its item leads into the summary.
+  const segMatch = text.match(
+    /((?:we|our\s+(?:Company|Group))\b[^.]*?principally\s+(?:involved|engaged)\s+in[^.]*\.)\s*(?:Our\s+Group['’]?s?\s+business\s+is\s+segmented[^:]*:|[^.]*?following\s+(?:core\s+)?(?:principal\s+)?(?:business\s+)?(?:activities|segments)[^:]*:)?\s*(.*)$/i,
+  );
+  if (segMatch) {
+    const lead = segMatch[1].replace(/\s+/g, ' ').trim();
+    const rest = segMatch[2] ?? '';
+    // Pull the short description after each roman/number list marker.
+    const items = rest.match(/(?:^|\s)(?:[ivx]{1,4}\.|\([ivx]{1,4}\)|[a-h]\.)\s+([a-z][^.;–-]{6,70})/gi);
+    if (items && items.length >= 2) {
+      const leads = items
+        .map((s) => s.replace(/^[\s]*(?:[ivx]{1,4}\.|\([ivx]{1,4}\)|[a-h]\.)\s+/i, '').trim())
+        .map((s) => s.replace(/\s+[–-]\s*$/, '').trim())
+        .filter(Boolean);
+      const joined = `${lead} Its core activities are: ${leads.join('; ')}.`;
+      const picked = tidyBusinessProse(joined, 360);
+      if (picked) return field(picked, { page: anchor.page, confidence: 'medium' });
+    }
+  }
 
   // Split into sentences and keep the ones that describe business activity,
   // skipping pure incorporation/name-change boilerplate.
@@ -1774,9 +1848,20 @@ function parseBusinessPoints(
   const end = stop ? stop.index : Math.min(start.index + 120, idx.lines.length);
 
   const points: BusinessPoint[] = [];
-  // A list-item heading: "(a) Text", "(b) Text", or "7.3.1 Text" / "6.5.8 Text".
-  const letterHead = /^\(([a-j])\)\s+(.{6,160})$/;
+  // A list-item heading. Prospectuses mark items three ways:
+  //   "(a) Text" / "(b) Text"      — lettered (most common)
+  //   "(i) Text" / "(ii) Text"     — roman-numeral (e.g. RedPlanet)
+  //   "7.3.1 Text" / "6.5.8 Text"  — numbered sub-sections (full section form)
+  const letterHead = /^\((?:([a-j])|([ivx]{1,4}))\)\s+(.{6,160})$/i;
   const numberHead = /^\d+\.\d+\.\d+\s+(.{6,160})$/;
+  const headingText = (line: string): string | null => {
+    const lm = line.match(letterHead);
+    if (lm) return (lm[3] ?? '').trim();
+    const nm = line.match(numberHead);
+    if (nm) return (nm[1] ?? '').trim();
+    return null;
+  };
+  const isItemHead = (line: string): boolean => letterHead.test(line) || numberHead.test(line);
 
   // Lines that are the sub-section's own title or lead-in, not a real item.
   const isIntroLine = (s: string) =>
@@ -1787,21 +1872,32 @@ function parseBusinessPoints(
   for (let i = start.index + 1; i < end; i++) {
     const line = idx.lines[i].trim();
     if (isIntroLine(line)) continue;
-    const lm = line.match(letterHead);
-    const nm = line.match(numberHead);
-    if (!lm && !nm) continue;
-
-    let heading = (lm ? lm[2] : nm![1]).replace(/\s+/g, ' ').trim();
+    let heading = headingText(line);
+    if (heading === null) continue;
+    heading = heading.replace(/\s+/g, ' ').trim();
+    if (heading.length < 6) continue;
     // A numbered sub-item that is merely the list title ("3.3.1 Competitive
     // strengths") is not a real point — skip it.
     if (isIntroLine(heading)) continue;
-    // Headings often wrap onto the next line (no terminal punctuation, and the
-    // next line is lower-case continuation rather than the body paragraph).
+    // Headings often wrap onto the next line. The continuation line may be the
+    // whole tail (short line) or may run straight into the body paragraph on
+    // the same text line ("… intelligent" / "rail solutions We have been …").
+    // Absorb only the words needed to finish the heading phrase, stopping at
+    // the point where the body sentence begins (a capitalised new sentence or
+    // a sentence-ending full stop).
     const next = idx.lines[i + 1]?.trim();
-    if (next && heading.length < 90 && /^[a-z]/.test(next) && !/^\(?[a-j]\)/.test(next)) {
-      // Only absorb if it reads like a heading tail (short, no full stop).
-      if (next.length < 90 && !/\.$/.test(heading)) {
+    const headingIncomplete = !/[.;:]$/.test(heading) && heading.length < 110;
+    if (next && headingIncomplete && /^[a-z]/.test(next) && !isItemHead(next)) {
+      if (next.length < 90) {
+        // Short line: the entire line is the heading tail.
         heading = `${heading} ${next}`.replace(/\s+/g, ' ').trim();
+      } else {
+        // Long line: take the leading lower-case run that completes the phrase,
+        // up to where a new capitalised sentence (the body) starts.
+        const tail = next.match(/^([a-z][a-z\s&/-]*?)(?=\s+[A-Z]|[.;])/);
+        if (tail && tail[1].trim().split(/\s+/).length <= 4) {
+          heading = `${heading} ${tail[1].trim()}`.replace(/\s+/g, ' ').trim();
+        }
       }
     }
     if (looksGarbled(heading)) continue;
@@ -1811,7 +1907,7 @@ function parseBusinessPoints(
     const detailLines: string[] = [];
     for (let j = i + 1; j < Math.min(i + 10, end); j++) {
       const dl = idx.lines[j].trim();
-      if (letterHead.test(dl) || numberHead.test(dl)) break;
+      if (isItemHead(dl)) break;
       if (isIntroLine(dl)) continue;
       if (/^\d+\s*$/.test(dl) || /Registration\s+No\.|PROSPECTUS\s+SUMMARY|BUSINESS\s+OVERVIEW/i.test(dl)) continue;
       // Table artefacts (notes, footnote asterisks) are not prose detail.
@@ -1826,13 +1922,28 @@ function parseBusinessPoints(
     // grocery retail segment", detail starts "grocery retail segment With a
     // history …"). Drop that duplicated run so the detail reads cleanly.
     if (detail) {
+      // Strategy A: the detail repeats a trailing slice of the heading verbatim.
       const tail = heading.split(' ').slice(-4).join(' ');
       const dup = detail.toLowerCase().indexOf(tail.toLowerCase());
       if (tail.length > 8 && dup >= 0 && dup < 40) {
         detail = detail.slice(dup + tail.length).replace(/^[\s.;,]+/, '').trim();
-        if (detail.length < 12) detail = null;
-        else detail = detail.charAt(0).toUpperCase() + detail.slice(1);
+      } else {
+        // Strategy B: the detail's leading words are the tail of the heading
+        // (heading wrapped mid-phrase). Drop the longest such leading run.
+        const hWords = heading.toLowerCase().split(/\s+/);
+        const dWords = detail.split(/\s+/);
+        let overlap = 0;
+        for (let n = Math.min(5, dWords.length); n >= 1; n--) {
+          const run = dWords.slice(0, n).join(' ').toLowerCase();
+          if (hWords.join(' ').endsWith(run)) {
+            overlap = n;
+            break;
+          }
+        }
+        if (overlap > 0) detail = dWords.slice(overlap).join(' ').trim();
       }
+      if (detail.length < 12) detail = null;
+      else detail = detail.charAt(0).toUpperCase() + detail.slice(1);
     }
 
     points.push({ heading, detail, page: idx.linePages[i] });
