@@ -1560,14 +1560,7 @@ function parsePeople(idx: DocIndex): { directors: Person[]; management: Person[]
       const name = m[1].replace(/\s+/g, ' ').trim();
       if (name.length < 3 || /^(Name|Designation)$/i.test(name)) continue;
       const role = m[2].replace(/\s+/g, ' ').trim();
-      into.push({
-        name,
-        role,
-        // "Non-Independent" must not count as independent, and "Non-Executive"
-        // must not count as executive — strip the negated forms before testing.
-        isIndependent: /\bindependent\b/i.test(role.replace(/non-independent/gi, '')),
-        isExecutive: /\b(managing|executive)\b/i.test(role.replace(/non-executive/gi, '')),
-      });
+      into.push(makePerson(name, role));
     }
   };
 
@@ -1578,7 +1571,244 @@ function parsePeople(idx: DocIndex): { directors: Person[]; management: Person[]
     collect(mgmtAnchor.index + 1, mgmtAnchor.index + 12, management);
   }
 
+  // Fallback: when the simple one-line table above yields no directors, parse
+  // the "BOARD OF DIRECTORS" block in the Corporate Directory, whose records
+  // span several wrapped lines (name, designation, address). This is the
+  // layout used by book-built and larger IPOs (99 Speed Mart, Sunway, RNG
+  // Tech, SRKK, Pioneer) that the one-line matcher cannot read.
+  if (directors.length === 0) {
+    const fromDirectory = parseDirectorsFromCorporateDirectory(idx);
+    if (fromDirectory.length > 0) return { directors: fromDirectory, management };
+  }
+
   return { directors, management };
+}
+
+/** Builds a Person, classifying independence/executive status from the role. */
+function makePerson(name: string, role: string): Person {
+  const r = role.replace(/\s+/g, ' ').trim();
+  return {
+    name: name.replace(/\s+/g, ' ').trim(),
+    role: r,
+    // "Non-Independent" must not count as independent, and "Non-Executive"
+    // must not count as executive — strip the negated forms before testing.
+    isIndependent: /\bindependent\b/i.test(r.replace(/non-independent/gi, '')),
+    isExecutive: /\b(managing|executive)\b/i.test(r.replace(/non-executive/gi, '')),
+  };
+}
+
+/**
+ * Recovers the board from the "BOARD OF DIRECTORS" table in the Corporate
+ * Directory section.
+ *
+ * These tables list one director per record, but each record wraps over
+ * several physical lines because the address column is multi-line, and the
+ * designation itself often wraps too. Column order varies between issuers
+ * ("Name Designation Gender Address", "Name (Gender) Designation Nationality
+ * Address", "Name (Designation) Address Nationality", …). Rather than parse
+ * columns, we exploit two invariants:
+ *   1. every director carries a designation drawn from a closed vocabulary
+ *      (… Independent / Executive … Chairman|Director|Officer …); and
+ *   2. the record's name is the text immediately preceding that designation.
+ * The table ends at the first board-committee or next-section heading, so we
+ * never pick up committee-membership rows (which would double-count people).
+ */
+function parseDirectorsFromCorporateDirectory(idx: DocIndex): Person[] {
+  const anchor = findLine(idx, /^BOARD\s+OF\s+DIRECTORS\s*$/i);
+  if (!anchor) return [];
+
+  // The table ends at the first committee / next corporate-directory section.
+  const STOP =
+    /^(AUDIT\b.*COMMITTEE|NOMINATION\b.*COMMITTEE|REMUNERATION\b.*COMMITTEE|RISK\b.*COMMITTEE|.*\bCOMMITTEE\s*$|KEY\s+SENIOR\s+MANAGEMENT|COMPANY\s+SECRETAR|REGISTERED\s+OFFICE|REGISTRAR|AUDITORS?\b|PRINCIPAL\s+BANKER|SPONSOR\b|ADVISER\b|SOLICITORS?\b)/i;
+  let end = idx.lines.length;
+  for (let i = anchor.index + 1; i < Math.min(anchor.index + 90, idx.lines.length); i++) {
+    if (STOP.test(idx.lines[i].trim())) {
+      end = i;
+      break;
+    }
+  }
+
+  // A designation is built from the closed Bursa vocabulary, so address/prose
+  // lines never match. A canonical designation is a run of qualifiers ending
+  // in a role noun. We also capture a trailing "/ CEO"-style second title.
+  const QUALIFIER =
+    '(?:(?:Senior\\s+)?(?:Non-)?Independent|(?:Non-)?Executive|Managing|Group|Deputy|Alternate)';
+  const ENDING =
+    '(?:Chairman|Chairperson|Chairwoman|Managing\\s+Director|Director|Chief\\s+\\w+(?:\\s+\\w+)?\\s+Officer|President|CEO|COO|CFO|CSO|CTO)';
+  // The clean, canonical designation that may appear inline or parenthesised.
+  const DESIG_CANON = new RegExp(
+    `((?:${QUALIFIER}\\s+)*${ENDING}(?:\\s*(?:/|cum|and)\\s*(?:Chief\\s+\\w+(?:\\s+\\w+)?\\s+Officer|CEO|COO|CFO|CSO|CTO|President|Managing\\s+Director|Director))?)`,
+    'i',
+  );
+
+  // Does a line *start* with a designation (Case A: designation on its own
+  // line, name on the line above)? Allow a leading "(".
+  const startsWithDesig = (l: string): boolean =>
+    new RegExp(`^\\(?\\s*(?:${QUALIFIER}\\s+)*(?:${ENDING})\\b`, 'i').test(l);
+
+  const out: Person[] = [];
+  const seen = new Set<string>();
+  const push = (name: string | null, role: string) => {
+    let r = cleanDesignation(role);
+    // Trim any address/geography tail that bled into the role from a wrapped
+    // layout ("Executive Chairperson Persiaran Bayan Indah" → "… Chairperson").
+    r = r
+      .replace(
+        /\s+(Persiaran|Jalan|Lorong|Taman|Lingkungan|Bandar|Seksyen|Desa|Bukit|Kampung|Lot|Blok|Block|Unit|No\.?)\b.*$/i,
+        '',
+      )
+      .trim();
+    // The role must be a believable designation, not an address fragment.
+    if (!name || !r || /\d/.test(r) || r.length > 70) return;
+    if (!/(Chairman|Chairperson|Chairwoman|Director|Officer|President|CEO|COO|CFO|CSO|CTO)/i.test(r)) return;
+    if (seen.has(name.toLowerCase())) return;
+    seen.add(name.toLowerCase());
+    out.push(makePerson(name, r));
+  };
+
+  for (let i = anchor.index + 1; i < end; i++) {
+    const line = idx.lines[i].trim();
+    if (/^(Name|Nationality|Designation|Residential|Profession|Notes?:|Gender|Address)\b/i.test(line)) continue;
+    if (/^\(?[MF]\)?\s+refers\s+to/i.test(line)) continue;
+
+    // Case A — the line *is* a designation (optionally parenthesised). The
+    // name is on the nearest preceding line that reads like a name.
+    if (startsWithDesig(line.replace(/^\(/, ''))) {
+      let role: string;
+      const paren = line.match(/^\(([^)]+)\)/);
+      if (paren) {
+        // Parenthesised designation with trailing address — keep only the
+        // parenthesised part (SRKK: "(Independent Non-Executive Chairperson)").
+        role = paren[1];
+      } else {
+        // Bare designation line; absorb a short wrapped continuation.
+        role = line;
+        for (let j = i + 1; j < Math.min(i + 3, end); j++) {
+          const nxt = idx.lines[j].trim();
+          if (nxt.length < 36 && /^(Non-Independent|Non-Executive|Independent|Executive|Director|Officer|President|Chairman|Chairperson)\b/i.test(nxt) && !startsWithDesig(idx.lines[j + 1]?.trim() ?? '')) {
+            role += ` ${nxt}`;
+          } else break;
+        }
+      }
+      let name: string | null = null;
+      for (let k = i - 1; k >= Math.max(anchor.index + 1, i - 3); k--) {
+        name = extractName(idx.lines[k] ?? '');
+        if (name) break;
+      }
+      push(name, role);
+      continue;
+    }
+
+    // Case C — "Name <designation…> Nationality / <address>" on one line, with
+    // the designation continuing as the leading words of the next 1-2 lines
+    // (interleaved with gender/address). Used by 99 Speed Mart, Sunway and
+    // Pioneer. Recognised by a designation qualifier appearing before a
+    // nationality token on the same line.
+    const natSplit = line.match(
+      /^(.*?)\s+((?:Senior\s+)?(?:Non-)?Independent|(?:Non-)?Executive|Managing|Chief|Alternate)\b(.*?)\s+(Malaysian|Singaporean|Indian|Chinese|British|[A-Z][a-z]+ian)\s*(?:\/|(?=\s*(?:No\.|\d)))/,
+    );
+    if (natSplit) {
+      const name = extractName(natSplit[1]);
+      let role = `${natSplit[2]}${natSplit[3]}`.replace(/\s+/g, ' ').trim();
+      // Gather leading role words from continuation lines until the role reads
+      // complete (ends in a role noun) or a new record / address starts.
+      for (let j = i + 1; j < Math.min(i + 4, end); j++) {
+        if (/(Chairman|Chairperson|Director|Officer|President)\b/i.test(role)) break;
+        const lead = idx.lines[j]
+          .trim()
+          .match(/^((?:(?:Non-)?Executive|(?:Non-)?Independent|Director|Officer|Chairman|Chairperson|President|and|cum|Managing|Senior|Chief|\/|\s)+)/i);
+        if (lead && lead[1].trim()) role += ` ${lead[1].trim()}`;
+        else break;
+      }
+      role = cleanDesignation(role.replace(/\s+(Male|Female)\b.*$/i, ''));
+      push(name, role);
+      continue;
+    }
+
+    // Case B — name then designation on the same line, no nationality column.
+    const dm = line.match(DESIG_CANON);
+    if (dm && dm.index !== undefined && dm.index > 0) {
+      const name = extractName(line.slice(0, dm.index));
+      let role = dm[1];
+      for (let j = i + 1; j < Math.min(i + 3, end); j++) {
+        const nxt = idx.lines[j].trim();
+        // Absorb only a short continuation that is a bare designation word and
+        // does not itself begin a new person's record.
+        if (
+          nxt.length < 30 &&
+          /^(Non-Independent|Non-Executive|Independent|Executive|Director|Officer|President|Chairman|Chairperson|cum|and)\b/i.test(nxt) &&
+          !/\d/.test(nxt) &&
+          extractName(nxt) === null
+        ) {
+          role += ` ${nxt}`;
+        } else break;
+      }
+      push(name, role);
+    }
+  }
+
+  return out;
+}
+
+/** Address / geography tokens that mark the end of a name (and never start one). */
+const ADDRESS_WORD =
+  /^(No\.?|Jalan|Lorong|Taman|Persiaran|Lingkungan|Block|Blok|Unit|Lot|Kampung|Bandar|Seksyen|Section|Desa|Bukit|Kuala|Selangor|Johor|Penang|Perak|Pulau|Wilayah|Negeri|Malaysia|Malaysian|Singaporean|Singapore|Condominium|Resort|Homes|Condo|Plaza|and|cum|refers)\b/i;
+
+/** Pulls a person's name out of a cell, dropping gender tags and address bleed. */
+function extractName(s: string): string | null {
+  const cleaned = s
+    .replace(/\((?:M|F|Dr\.?|male|female)\)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  // Reject lines that are the column header or begin with an address word.
+  if (/^(Name|Nationality|Designation|Residential|Profession|Gender|Address)\b/i.test(cleaned)) {
+    return null;
+  }
+  if (ADDRESS_WORD.test(cleaned)) return null;
+
+  // Walk tokens while they look like name parts; stop at the first token that
+  // carries a digit (address) or is an address/geography word.
+  const tokens = cleaned.split(' ');
+  const nameTokens: string[] = [];
+  for (const t of tokens) {
+    if (/\d/.test(t) || ADDRESS_WORD.test(t)) break;
+    // A name token is capitalised or a Malay connector (bin/binti/a/l/a/p/@).
+    if (/^(?:[A-Z][A-Za-z@.'’-]*|bin|binti|a\/[lp]|@|\([^)]*\))$/.test(t)) {
+      nameTokens.push(t.replace(/[(),/]+$/, ''));
+    } else {
+      break;
+    }
+    if (nameTokens.length >= 7) break;
+  }
+  let name = nameTokens.join(' ').replace(/\s+/g, ' ').trim();
+  // Strip a trailing designation run that bled in from a wrapped layout
+  // ("Chang Kai Ren Executive Director cum" → "Chang Kai Ren").
+  name = name
+    .replace(
+      /\s+((?:Senior\s+)?(?:Non-?)?Independent|(?:Non-?)?Executive|Managing|Alternate|Chief)\b.*$/i,
+      '',
+    )
+    .replace(/\s+(?:Chairman|Chairperson|Director|Officer|President|and|cum|to)\b.*$/i, '')
+    .trim();
+  if (name.split(' ').length < 2 || name.length < 4) return null;
+  // Any residual designation word means we failed to isolate a clean name.
+  if (/(Chairman|Chairperson|Director|Officer|President|Executive|Independent)/i.test(name)) {
+    return null;
+  }
+  return name;
+}
+
+/** Normalises a designation string and strips a trailing parenthesis/connector. */
+function cleanDesignation(s: string): string {
+  return s
+    .replace(/^\(/, '')
+    .replace(/\)\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/Non-\s+/gi, 'Non-') // repair wrapped "Non- Executive" → "Non-Executive"
+    .replace(/\s*\/\s*/g, '/') // tidy "Director/ CEO" spacing
+    .replace(/\s*(?:to|and|cum|\/|,)\s*$/i, '') // dangling connector ("Alternate Director to")
+    .trim();
 }
 
 function parseMoratorium(idx: DocIndex): Field<string> {
