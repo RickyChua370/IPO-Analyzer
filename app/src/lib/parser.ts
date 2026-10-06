@@ -13,6 +13,7 @@
 
 import {
   type Allocation,
+  type BusinessPoint,
   type Field,
   type FinancialPeriod,
   type ParsedProspectus,
@@ -1633,6 +1634,336 @@ function parseRiskFactors(idx: DocIndex): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Business overview — "what does the company actually do"
+// ---------------------------------------------------------------------------
+
+/**
+ * pdf.js occasionally emits mojibake for prospectuses that embed non-standard
+ * font encodings (e.g. Sunway Healthcare: "7KH SULQFLSDO..."). Such text is
+ * useless to a reader and must never reach the UI, so we detect and reject it.
+ * The tell-tale sign is a high density of improbable capital-letter runs and
+ * stray glyphs inside otherwise word-like tokens.
+ */
+function looksGarbled(s: string): boolean {
+  if (!s) return true;
+  // Mid-word capital runs ("7KH SULQFLSDO") and stray non-text glyphs are the
+  // fingerprint of a bad font decode.
+  let weird = (s.match(/[A-Z]{2,}(?=[a-z])|[¶³�]/g) ?? []).length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    // C0 control characters other than tab/newline/carriage-return.
+    if (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) weird++;
+  }
+  const words = s.split(/\s+/).length;
+  return weird > 0 && weird / Math.max(words, 1) > 0.25;
+}
+
+/**
+ * Normalises an extracted prose fragment for display: collapses whitespace,
+ * repairs the common PDF artefacts, trims to a sentence boundary near `max`
+ * characters, and returns null if the result is empty or garbled.
+ */
+function tidyBusinessProse(s: string | undefined | null, max = 320): string | null {
+  if (!s) return null;
+  let out = s
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;])/g, '$1')
+    // Strip trailing cross-references and page-break artefacts.
+    .replace(/\s*(?:For\s+)?[Ff]urther\s+details?.*$/i, '')
+    .replace(/\s+\d{1,4}(\s+\d{1,4})?\s*$/, '')
+    .replace(/\s+Registration\s+No\.?.*$/i, '')
+    .trim();
+  if (looksGarbled(out)) return null;
+  if (out.length > max) {
+    // Cut at the last sentence end before `max`, else the last word break.
+    const slice = out.slice(0, max);
+    const lastStop = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('; '));
+    out = (lastStop > max * 0.5 ? slice.slice(0, lastStop + 1) : slice.replace(/\s+\S*$/, '')).trim();
+    if (!/[.;]$/.test(out)) out += '…';
+  }
+  return out.length >= 12 ? out : null;
+}
+
+/**
+ * Finds a section heading that introduces real body content, skipping the
+ * table-of-contents entry for the same section.
+ *
+ * A prospectus lists "3.3 COMPETITIVE STRENGTHS … 11" in its contents page and
+ * then repeats the heading above the actual section. The TOC line is a false
+ * positive: it ends with a page number and is immediately followed by more
+ * contents entries, never by body text. We accept a heading only when the few
+ * lines beneath it look like prose or a list item, not another TOC row.
+ */
+function findRealSectionHeading(idx: DocIndex, re: RegExp): LineHit | null {
+  let from = 0;
+  for (;;) {
+    const hit = findLine(idx, re, from);
+    if (!hit) return null;
+    from = hit.index + 1;
+    // Peek at the next few non-empty lines.
+    const after = idx.lines.slice(hit.index + 1, hit.index + 5);
+    const nextIsTocEntry = after.some((l) => /^\d+(?:\.\d+)*\s+[A-Z].*\s+\d{1,3}\s*$/.test(l));
+    const hasBodyOrItem = after.some(
+      (l) =>
+        /^\(?[a-j]\)/.test(l.trim()) || // list item
+        /^\d+\.\d+\.\d+\s+[A-Za-z]/.test(l.trim()) || // numbered sub-item
+        /^(?:Our|We|The|Through)\b/.test(l.trim()) || // intro prose
+        /are\s+(?:summarised|as\s+follows)/i.test(l), // "… are as follows:"
+    );
+    // A TOC heading itself usually carries a trailing page number too.
+    const selfLooksLikeToc = /\s\d{1,3}\s*$/.test(hit.line) && nextIsTocEntry;
+    if (!selfLooksLikeToc && hasBodyOrItem) return hit;
+  }
+}
+
+/**
+ * The summary business section ("3.2 OUR BUSINESS" / "OUR GROUP" / "PRINCIPAL
+ * BUSINESS ACTIVITIES") describes how the company makes money. The first
+ * paragraph is usually incorporation boilerplate ("was incorporated … on …"),
+ * so we take the first substantive paragraph that actually describes activity.
+ */
+function parseBusinessModel(idx: DocIndex): Field<string> {
+  const anchor =
+    findRealSectionHeading(idx, /^3\.\d+\s+OUR\s+BUSINESS\s*$/i) ??
+    findRealSectionHeading(idx, /^3\.\d+\s+PRINCIPAL\s+BUSINESS\s+ACTIVITIES(?:\s+AND\s+SERVICES)?\s*$/i) ??
+    findRealSectionHeading(idx, /^3\.\d+\s+OUR\s+GROUP\s*$/i);
+  if (!anchor) return missing<string>();
+
+  // Gather the lines of this subsection until the next numbered heading.
+  const buf: string[] = [];
+  for (let i = anchor.index + 1; i < Math.min(anchor.index + 40, idx.lines.length); i++) {
+    const line = idx.lines[i];
+    if (/^3\.\d+\s+[A-Z]/.test(line)) break; // next subsection
+    if (/^\d+\s*$/.test(line) || /PROSPECTUS\s+SUMMARY|Registration\s+No\./i.test(line)) continue;
+    buf.push(line);
+  }
+  const text = buf.join(' ').replace(/\s+/g, ' ');
+
+  // Split into sentences and keep the ones that describe business activity,
+  // skipping pure incorporation/name-change boilerplate.
+  const sentences = text.split(/(?<=\.)\s+(?=[A-Z0-9“"])/);
+  const activity = sentences.filter(
+    (s) =>
+      /\b(we|our\s+(?:Company|Group)|through)\b/i.test(s) &&
+      /\b(principally|involved|operate|provide|provision|engaged|retailing|manufactur|services?|business|chain|segment|flagship)\b/i.test(s) &&
+      !/\bincorporated\s+(?:in\s+Malaysia\s+)?under\b/i.test(s) &&
+      !/\bchanged\s+its\s+name\b/i.test(s) &&
+      !/\bconverted\s+into\s+a\s+public\b/i.test(s),
+  );
+  const picked = tidyBusinessProse(activity.slice(0, 2).join(' '));
+  if (picked) return field(picked, { page: anchor.page, confidence: 'medium' });
+  return missing<string>();
+}
+
+/**
+ * Parses a lettered/numbered list of bold-heading items under a section such
+ * as "Competitive strengths" or "Business strategies". Two layouts occur:
+ *   summary form:  "(a) <heading>" then a paragraph  (Section 3.x)
+ *   full form:     "7.3.1 <heading>" then a paragraph (Section 7.x / 6.x)
+ * The heading itself is the concise takeaway; we attach the first sentence of
+ * the following paragraph as supporting detail.
+ */
+function parseBusinessPoints(
+  idx: DocIndex,
+  startRe: RegExp,
+  stopRe: RegExp,
+): BusinessPoint[] {
+  const start = findRealSectionHeading(idx, startRe);
+  if (!start) return [];
+  const stop = findLine(idx, stopRe, start.index + 1);
+  const end = stop ? stop.index : Math.min(start.index + 120, idx.lines.length);
+
+  const points: BusinessPoint[] = [];
+  // A list-item heading: "(a) Text", "(b) Text", or "7.3.1 Text" / "6.5.8 Text".
+  const letterHead = /^\(([a-j])\)\s+(.{6,160})$/;
+  const numberHead = /^\d+\.\d+\.\d+\s+(.{6,160})$/;
+
+  // Lines that are the sub-section's own title or lead-in, not a real item.
+  const isIntroLine = (s: string) =>
+    /^(?:Competitive\s+strengths|Business\s+strateg(?:y|ies)|Future\s+plans)/i.test(s) ||
+    /are\s+(?:summarised|as\s+follows)/i.test(s) ||
+    /^Our\s+(?:competitive\s+strengths|business\s+strateg|future\s+plans)/i.test(s);
+
+  for (let i = start.index + 1; i < end; i++) {
+    const line = idx.lines[i].trim();
+    if (isIntroLine(line)) continue;
+    const lm = line.match(letterHead);
+    const nm = line.match(numberHead);
+    if (!lm && !nm) continue;
+
+    let heading = (lm ? lm[2] : nm![1]).replace(/\s+/g, ' ').trim();
+    // A numbered sub-item that is merely the list title ("3.3.1 Competitive
+    // strengths") is not a real point — skip it.
+    if (isIntroLine(heading)) continue;
+    // Headings often wrap onto the next line (no terminal punctuation, and the
+    // next line is lower-case continuation rather than the body paragraph).
+    const next = idx.lines[i + 1]?.trim();
+    if (next && heading.length < 90 && /^[a-z]/.test(next) && !/^\(?[a-j]\)/.test(next)) {
+      // Only absorb if it reads like a heading tail (short, no full stop).
+      if (next.length < 90 && !/\.$/.test(heading)) {
+        heading = `${heading} ${next}`.replace(/\s+/g, ' ').trim();
+      }
+    }
+    if (looksGarbled(heading)) continue;
+    heading = heading.replace(/\s*\.$/, '');
+
+    // Supporting detail: the first sentence of the paragraph beneath the heading.
+    const detailLines: string[] = [];
+    for (let j = i + 1; j < Math.min(i + 10, end); j++) {
+      const dl = idx.lines[j].trim();
+      if (letterHead.test(dl) || numberHead.test(dl)) break;
+      if (isIntroLine(dl)) continue;
+      if (/^\d+\s*$/.test(dl) || /Registration\s+No\.|PROSPECTUS\s+SUMMARY|BUSINESS\s+OVERVIEW/i.test(dl)) continue;
+      // Table artefacts (notes, footnote asterisks) are not prose detail.
+      if (/^Notes?\s*:/i.test(dl)) break;
+      detailLines.push(dl);
+      if (/\.\s*$/.test(dl) && detailLines.join(' ').length > 60) break;
+    }
+    let detail = tidyBusinessProse(detailLines.join(' '), 240);
+
+    // The heading frequently wraps, so the first words of the paragraph can
+    // repeat the heading's tail (e.g. heading "… growth potential of the
+    // grocery retail segment", detail starts "grocery retail segment With a
+    // history …"). Drop that duplicated run so the detail reads cleanly.
+    if (detail) {
+      const tail = heading.split(' ').slice(-4).join(' ');
+      const dup = detail.toLowerCase().indexOf(tail.toLowerCase());
+      if (tail.length > 8 && dup >= 0 && dup < 40) {
+        detail = detail.slice(dup + tail.length).replace(/^[\s.;,]+/, '').trim();
+        if (detail.length < 12) detail = null;
+        else detail = detail.charAt(0).toUpperCase() + detail.slice(1);
+      }
+    }
+
+    points.push({ heading, detail, page: idx.linePages[i] });
+    if (points.length >= 8) break;
+  }
+
+  return points;
+}
+
+/**
+ * Competitive strengths. Prefers the concise summary list in Section 3.x; if
+ * that section only cross-references the detail (as some prospectuses do),
+ * falls back to the full Section 6.x / 7.x list.
+ */
+function parseCompetitiveStrengths(idx: DocIndex): BusinessPoint[] {
+  const summary = parseBusinessPoints(
+    idx,
+    /^3\.\d+(?:\.\d+)?\s+(?:OUR\s+)?COMPETITIVE\s+STRENGTHS\b/i,
+    /^3\.\d+\s+(?:FUTURE\s+PLANS|BUSINESS\s+STRATEG|RISK\s+FACTORS|OUR\s+BUSINESS\s+STRATEG)/i,
+  );
+  if (summary.length > 0) return summary;
+  return parseBusinessPoints(
+    idx,
+    /^(?:6|7)\.\d+\s+(?:OUR\s+)?COMPETITIVE\s+STRENGTHS\b/i,
+    /^(?:6|7)\.\d+\s+(?:OUR\s+)?(?:BUSINESS\s+STRATEG|FUTURE\s+PLANS)/i,
+  );
+}
+
+/** Business strategies / future plans — same two-layout handling. */
+function parseBusinessStrategies(idx: DocIndex): BusinessPoint[] {
+  const summary = parseBusinessPoints(
+    idx,
+    /^3\.\d+(?:\.\d+)?\s+(?:FUTURE\s+PLANS(?:\s+AND\s+STRATEGIES)?|BUSINESS\s+STRATEG(?:Y|IES)(?:\s+AND\s+FUTURE\s+PLANS)?)\b/i,
+    /^3\.\d+\s+(?:RISK\s+FACTORS|DIVIDEND|FINANCIAL\s+)/i,
+  );
+  if (summary.length > 0) return summary;
+  return parseBusinessPoints(
+    idx,
+    /^(?:6|7)\.\d+\s+(?:OUR\s+)?(?:BUSINESS\s+STRATEG(?:Y|IES)|FUTURE\s+PLANS)\b/i,
+    /^(?:6|7)\.\d+\s+[A-Z]/i,
+  );
+}
+
+/**
+ * Products and services. Looks for the prospectus' own enumeration of what it
+ * sells, typically introduced by "principally involved in", "products and
+ * services", or a "(i) … (ii) …" activity list in the business section.
+ */
+function parseProductsServices(idx: DocIndex): Field<string> {
+  const patterns: RegExp[] = [
+    // An enumerated activity list: "principally involved in the (i) … (ii) …".
+    /principally\s+involved\s+in\s+(?:the\s+)?((?:\([ivx]+\)\s*[^.]{3,90}){2,})/i,
+    /our\s+(?:principal\s+|key\s+|main\s+)?products\s+and\s+services\s+(?:comprise|include|consist\s+of)\s+([^.]{15,300}?)\./i,
+    /we\s+(?:are\s+(?:principally\s+)?)?(?:a|an)\s+([a-z][^.]{15,200}?(?:provider|manufacturer|retailer|operator|specialist|developer))\b[^.]{0,120}?\./i,
+    /core\s+(?:expertise|business)\s+(?:in|is)\s+([^.]{15,220}?)\./i,
+  ];
+  for (const re of patterns) {
+    const hit = findProse(idx, re);
+    const captured = hit?.match[1];
+    if (!hit || !captured) continue;
+    // Reject fragments that are clauses, not product/service descriptions.
+    if (/^(?:in\s+order\s+to|to\s+(?:our|the)|either\s+through|that\s+allow)/i.test(captured.trim())) {
+      continue;
+    }
+    const cleaned = tidyBusinessProse(
+      captured
+        .replace(/\s*\([ivx]+\)\s*/gi, '; ')
+        .replace(/^[;\s]+/, '')
+        .replace(/;\s*;/g, ';'),
+      260,
+    );
+    if (cleaned && /\b(services?|products?|solutions?|systems?|construction|retail|engineering|operation|provision|rental|manufactur|healthcare|chairs?|hospitals?|outlets?)\b/i.test(cleaned)) {
+      return field(cleaned, { page: hit.page, confidence: 'medium' });
+    }
+  }
+  return missing<string>();
+}
+
+/**
+ * Market position. Prospectuses that commission an independent market report
+ * (IMR) state a market share; we capture that sentence where present.
+ */
+function parseMarketPosition(idx: DocIndex): Field<string> {
+  const patterns: RegExp[] = [
+    /(?:we\s+(?:are|had|have|hold)|our\s+Group\s+(?:is|had|has))\s+[^.]*?market\s+share\s+of\s+(?:approximately\s+)?[\d.]+%[^.]{0,160}?\./i,
+    /(?:we\s+are|is)\s+(?:the\s+)?(?:largest|leading|first|only|one\s+of\s+the\s+(?:largest|leading))[^.]{10,200}?according\s+to\s+the\s+[A-Z][^.]{0,120}?\./i,
+    /according\s+to\s+the\s+(?:IMR|independent\s+market\s+research)\s+Report,?\s+we\s+[^.]{10,200}?\./i,
+  ];
+  for (const re of patterns) {
+    const hit = findProse(idx, re);
+    const cleaned = tidyBusinessProse(hit?.match[0], 260);
+    if (hit && cleaned) return field(cleaned, { page: hit.page, confidence: 'medium' });
+  }
+  return missing<string>();
+}
+
+/**
+ * Operational scale. Pulls concrete, verifiable "how big" facts from the
+ * business section — outlet/site/bed/DC counts, geographies and headcount —
+ * each phrased as a short standalone chip. Only facts stated in the document
+ * are emitted; nothing is inferred.
+ */
+function parseOperationalScale(idx: DocIndex): string[] {
+  const facts: string[] = [];
+  const seen = new Set<string>();
+  const add = (s: string | null) => {
+    if (!s) return;
+    const key = s.toLowerCase();
+    if (seen.has(key) || looksGarbled(s)) return;
+    seen.add(key);
+    facts.push(s);
+  };
+
+  // Count-style facts: "we operate 2,651 outlets", "licensed bed count of 848",
+  // "we have in total 19 DCs", "network to include four tertiary hospitals".
+  const countPatterns: { re: RegExp; fmt: (m: RegExpMatchArray) => string }[] = [
+    { re: /we\s+operate\s+([\d,]{2,7})\s+(outlets?|stores?|centres?|branches)/i, fmt: (m) => `${m[1]} ${m[2].toLowerCase()}` },
+    { re: /(?:have\s+(?:in\s+total\s+)?|total\s+of\s+)([\d,]{1,5})\s+(DCs?|distribution\s+centres?|outlets?|branches|stores?)/i, fmt: (m) => `${m[1]} ${m[2].replace(/s$/i, '').toUpperCase?.() ? m[2] : m[2]}`.replace(/\s+/g, ' ') },
+    { re: /licensed\s+bed\s+count\s+of\s+([\d,]{2,5})/i, fmt: (m) => `${m[1]} licensed beds` },
+    { re: /own\s+([\d,]{2,6})\s+(delivery\s+trucks?|vehicles?)/i, fmt: (m) => `${m[1]} ${m[2].toLowerCase()}` },
+    { re: /approximately\s+([\d,]{2,6})\s+SKUs?/i, fmt: (m) => `~${m[1]} SKUs` },
+  ];
+  for (const { re, fmt } of countPatterns) {
+    const hit = findProse(idx, re);
+    if (hit) add(fmt(hit.match).replace(/\s+/g, ' ').trim());
+  }
+
+  return facts.slice(0, 6);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1679,6 +2010,22 @@ export function parseProspectus(pages: string[], sourceFiles: string[] = []): Pa
 
   const businessDescription = safe(() => parseBusinessDescription(idx), missing<string>());
 
+  // Business model: prefer the richer "OUR BUSINESS" summary paragraph; if the
+  // section layout defeats extraction, fall back to the one-line principal
+  // activity so the "what they do" block is never empty when we know the
+  // activity. The fallback is marked lower confidence.
+  const businessModel = safe(() => {
+    const bm = parseBusinessModel(idx);
+    if (bm.value) return bm;
+    if (businessDescription.value) {
+      return field(businessDescription.value, {
+        page: businessDescription.page,
+        confidence: 'low',
+      });
+    }
+    return missing<string>();
+  }, missing<string>());
+
   return {
     companyName: safe(() => parseCompanyName(idx), missing<string>()),
     registrationNo: safe(() => parseRegistrationNo(idx), missing<string>()),
@@ -1686,6 +2033,13 @@ export function parseProspectus(pages: string[], sourceFiles: string[] = []): Pa
     prospectusDate: safe(() => parseProspectusDate(idx), missing<string>()),
     industry: safe(() => parseIndustry(idx, businessDescription.value), missing<string>()),
     businessDescription,
+
+    businessModel,
+    productsServices: safe(() => parseProductsServices(idx), missing<string>()),
+    marketPosition: safe(() => parseMarketPosition(idx), missing<string>()),
+    competitiveStrengths: safe(() => parseCompetitiveStrengths(idx), []),
+    businessStrategies: safe(() => parseBusinessStrategies(idx), []),
+    operationalScale: safe(() => parseOperationalScale(idx), []),
 
     ipoPrice: safe(() => parseIpoPrice(idx), missing<number>()),
     marketCap: safe(() => parseMarketCap(idx), missing<number>()),

@@ -484,6 +484,61 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     whyItMatters:
       'G7 status means the company can bid for the largest projects, which widens its opportunity set. It is a licensing threshold, not a guarantee of profitability.',
   },
+
+  // --- Business overview ----------------------------------------------------
+  businessModel: {
+    term: 'Business Model',
+    short: 'How the company actually earns its money.',
+    plain:
+      'This describes what the company sells and the way it gets paid — for example by completing one-off projects, selling goods in shops, renting equipment, or charging fees for a service. It is the engine behind every number in the report.',
+    whyItMatters:
+      'You cannot judge whether a price is fair, or whether profits are likely to last, until you understand how the money is made. A business that bills recurring fees is very different from one chasing a new contract every few months.',
+  },
+
+  productsServices: {
+    term: 'Products & Services',
+    short: 'The specific things the company sells to its customers.',
+    plain:
+      'The concrete goods or services the business offers — the groceries on its shelves, the buildings it constructs, the medical treatments it provides, or the equipment it rents out. Taken from the prospectus\u2019 own description.',
+    whyItMatters:
+      'Knowing exactly what is being sold tells you how exposed the company is to a single product, how easily rivals could copy it, and whether demand is likely to be steady or one-off.',
+  },
+
+  marketPosition: {
+    term: 'Market Position',
+    short: 'How large or dominant the company is within its industry.',
+    plain:
+      'A statement of where the company sits among its competitors — such as being the market leader, holding a stated share of the market, or being first to do something. These claims usually come from an independent market research report commissioned for the IPO.',
+    whyItMatters:
+      'A leading position can mean pricing power and resilience, but a market-share figure is only as reliable as the report behind it, and a narrow definition of "the market" can flatter a company. Treat it as a claim to check, not a fact.',
+  },
+
+  competitiveStrengths: {
+    term: 'Competitive Strengths',
+    short: 'The advantages the company says set it apart from rivals.',
+    plain:
+      'The prospectus\u2019 own list of why the business should win — things like a long track record, a well-known brand, a wide branch network, or an experienced management team. Each is the company\u2019s claim, phrased in its own words.',
+    whyItMatters:
+      'Strengths hint at whether the company can defend its profits over time. Because the company is selling itself here, read them critically and ask whether each advantage is genuinely hard for a competitor to copy.',
+  },
+
+  businessStrategies: {
+    term: 'Strategies & Future Plans',
+    short: 'What the company intends to do next with the IPO money.',
+    plain:
+      'The growth plans the company sets out — opening more outlets, buying equipment, expanding abroad, or developing new services. These usually line up with how the money raised in the IPO will be spent.',
+    whyItMatters:
+      'Plans tell you what you are betting on and how the proceeds will be used to grow. Check that the plans are concrete and funded, rather than vague ambitions, and that they match the stated use of proceeds.',
+  },
+
+  operationalScale: {
+    term: 'Operational Scale',
+    short: 'Concrete numbers showing how big the operations are.',
+    plain:
+      'Hard counts of the physical footprint — how many outlets, distribution centres, hospital beds, vehicles or product lines the company runs. These are the "how big" facts stated directly in the prospectus.',
+    whyItMatters:
+      'Scale gives the story a sense of proportion and a baseline to track growth against. It also hints at how much capital the business needs to run and how far the expansion plans would stretch it.',
+  },
 };
 
 /** Safe lookup used by the tooltip component. */
