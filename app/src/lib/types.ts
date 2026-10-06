@@ -151,6 +151,29 @@ export interface Person {
 }
 
 // ---------------------------------------------------------------------------
+// Business overview
+// ---------------------------------------------------------------------------
+
+/**
+ * One item from the prospectus' own "Competitive strengths" or "Business
+ * strategies / future plans" lists.
+ *
+ * Prospectuses present these as a lettered or numbered list where each item is
+ * a bold one-line heading followed by an explanatory paragraph. We keep the
+ * heading as the headline (what the strength/plan *is*) and the first sentence
+ * or two of the paragraph as supporting detail, each with its source page so
+ * the claim can be verified against the document.
+ */
+export interface BusinessPoint {
+  /** The bold heading — the strength or strategy in a nutshell. */
+  heading: string;
+  /** A short supporting extract from the prospectus' own prose, if found. */
+  detail: string | null;
+  /** 1-indexed page in the stitched document. */
+  page?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Pro forma balance sheet (post-IPO effects)
 // ---------------------------------------------------------------------------
 
@@ -181,6 +204,20 @@ export interface ParsedProspectus {
   prospectusDate: Field<string>;
   industry: Field<string>;
   businessDescription: Field<string>;
+
+  // What the company does, in its own words -------------------------------
+  /** How the company actually makes money (segments / revenue model). */
+  businessModel: Field<string>;
+  /** The products and/or services it sells. */
+  productsServices: Field<string>;
+  /** Market share / positioning statement, where the prospectus discloses it. */
+  marketPosition: Field<string>;
+  /** The prospectus' own list of competitive strengths. */
+  competitiveStrengths: BusinessPoint[];
+  /** The prospectus' own list of business strategies / future plans. */
+  businessStrategies: BusinessPoint[];
+  /** Concrete operational-scale facts (outlets, sites, beds, geographies …). */
+  operationalScale: string[];
 
   // Deal terms
   ipoPrice: Field<number>;

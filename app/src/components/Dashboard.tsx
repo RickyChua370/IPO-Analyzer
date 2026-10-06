@@ -148,6 +148,8 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
           <p className="head__desc">{p.businessDescription.value}</p>
         )}
 
+        <BusinessOverview parsed={p} />
+
         {/* Headline metrics */}
         <div className="kpis">
           <Kpi
@@ -870,6 +872,113 @@ function MiniStat({
   );
 }
 
+/**
+ * "What this company does" — the business story told in the prospectus' own
+ * words. Everything here is extracted from the document with a source page, so
+ * each claim is verifiable; the whole block is omitted only if nothing at all
+ * was found, so it never shows an empty shell.
+ */
+function BusinessOverview({ parsed: p }: { parsed: ParsedProspectus }) {
+  const hasModel = Boolean(p.businessModel.value);
+  const hasProducts = Boolean(p.productsServices.value);
+  const hasMarket = Boolean(p.marketPosition.value);
+  const hasScale = p.operationalScale.length > 0;
+  const hasStrengths = p.competitiveStrengths.length > 0;
+  const hasStrategies = p.businessStrategies.length > 0;
+
+  if (!hasModel && !hasProducts && !hasMarket && !hasScale && !hasStrengths && !hasStrategies) {
+    return null;
+  }
+
+  return (
+    <section className="biz">
+      <h2 className="h2">
+        What the company does{' '}
+        <span className="h2__note">extracted from the prospectus — verify against the source</span>
+      </h2>
+
+      {hasModel && (
+        <p className="biz__model">
+          <span className="biz__tag">
+            <Term k="businessModel">Business model</Term>
+          </span>{' '}
+          {p.businessModel.value}
+        </p>
+      )}
+
+      {(hasProducts || hasMarket || hasScale) && (
+        <div className="biz__facts">
+          {hasProducts && (
+            <div className="biz__fact">
+              <div className="biz__fact-label">
+                <Term k="productsServices">Products &amp; services</Term>
+              </div>
+              <div className="biz__fact-value">{p.productsServices.value}</div>
+            </div>
+          )}
+          {hasMarket && (
+            <div className="biz__fact">
+              <div className="biz__fact-label">
+                <Term k="marketPosition">Market position</Term>
+              </div>
+              <div className="biz__fact-value">{p.marketPosition.value}</div>
+            </div>
+          )}
+          {hasScale && (
+            <div className="biz__fact">
+              <div className="biz__fact-label">
+                <Term k="operationalScale">Scale</Term>
+              </div>
+              <div className="biz__fact-value">
+                {p.operationalScale.map((s) => (
+                  <span key={s} className="biz__chip">
+                    {s}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(hasStrengths || hasStrategies) && (
+        <div className="biz__cols">
+          {hasStrengths && (
+            <div className="biz__col">
+              <h3 className="h3">
+                <Term k="competitiveStrengths">Competitive strengths</Term>
+              </h3>
+              <ul className="biz__list">
+                {p.competitiveStrengths.map((pt, i) => (
+                  <li key={i} className="biz__item">
+                    <span className="biz__item-head">{pt.heading}</span>
+                    {pt.detail && <span className="biz__item-detail"> — {pt.detail}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {hasStrategies && (
+            <div className="biz__col">
+              <h3 className="h3">
+                <Term k="businessStrategies">Strategies &amp; future plans</Term>
+              </h3>
+              <ul className="biz__list">
+                {p.businessStrategies.map((pt, i) => (
+                  <li key={i} className="biz__item">
+                    <span className="biz__item-head">{pt.heading}</span>
+                    {pt.detail && <span className="biz__item-detail"> — {pt.detail}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function FinRow({
   label,
   glossary,
@@ -947,6 +1056,9 @@ function ParseAudit({
     prospectusDate: 'Prospectus date',
     industry: 'Sector',
     businessDescription: 'Business description',
+    businessModel: 'Business model',
+    productsServices: 'Products & services',
+    marketPosition: 'Market position',
     ipoPrice: 'IPO price',
     marketCap: 'Market capitalisation',
     enlargedShares: 'Enlarged share capital',

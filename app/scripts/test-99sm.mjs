@@ -99,6 +99,24 @@ console.log('\n--- Other ---');
 console.log('  dividend:', parsed.dividendPolicy.value, '| formal:', parsed.hasFormalDividendPolicy.value);
 console.log('  proceeds total field:', JSON.stringify(parsed.proceedsTotal));
 
+// Board recovered from the multi-line "Name Designation Gender Address"
+// Corporate Directory table, where each designation wraps across several lines
+// ("Non-Independent" / "Non-Executive" / "Chairman"). Guards the regression
+// where this layout yielded no directors and a misleading "0 independent".
+console.log('\n--- Board (Corporate Directory, wrapped designations) ---');
+for (const d of parsed.directors) console.log(`  ${d.name.padEnd(24)} ${d.role}`);
+check('directors found', parsed.directors.length >= 8, true);
+check(
+  'independent director detected',
+  parsed.directors.some((d) => /Ho Tat Heng/i.test(d.name) && d.isIndependent),
+  true,
+);
+check(
+  'director names free of address bleed',
+  parsed.directors.every((d) => !/\d|Jalan|Taman|Malaysian/i.test(d.name)),
+  true,
+);
+
 const fields = Object.entries(parsed).filter(([, v]) => v && typeof v === 'object' && 'confidence' in v);
 const found = fields.filter(([, v]) => v.value !== null).length;
 console.log(`\n--- Coverage: ${found}/${fields.length} headline fields ---`);

@@ -51,5 +51,17 @@ check('listing expenses classified', listing?.category, 'expenses');
 console.log('\n--- Relevance (IT services: no order book / concentration) ---');
 check('order book not applicable', metrics.relevance.orderBook, 'not_applicable');
 
+// Board recovered from the Corporate Directory, whose records use parenthesised
+// designations on their own line ("(Independent Non-Executive Chairperson)").
+console.log('\n--- Board (Corporate Directory, parenthesised designations) ---');
+for (const d of parsed.directors) console.log(`  ${d.name.padEnd(36)} ${d.role}`);
+check('directors', parsed.directors.length, 7);
+check('independent directors', parsed.directors.filter((d) => d.isIndependent).length, 4);
+check(
+  'chairperson name clean (no address bleed)',
+  parsed.directors[0]?.name,
+  'Rahima Beevi Binti Mohamed Ibrahim',
+);
+
 console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
 process.exit(fail > 0 ? 1 : 0);

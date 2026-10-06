@@ -79,6 +79,29 @@ for (const [name, needle] of expectInHtml) {
   check(`renders ${name}`, html.includes(needle), `missing "${needle}"`);
 }
 
+// --- Business overview ("what the company does") ---------------------------
+check('renders business overview heading', html.includes('What the company does'));
+check('renders competitive strengths', html.includes('Competitive strengths'));
+check('renders business strategies', html.includes('Strategies'));
+check(
+  'business model text present',
+  parsed.businessModel.value !== null && html.includes('construction'),
+);
+check(
+  'extracts at least one competitive strength',
+  parsed.competitiveStrengths.length > 0,
+  `${parsed.competitiveStrengths.length}`,
+);
+check(
+  'extracts at least one business strategy',
+  parsed.businessStrategies.length > 0,
+  `${parsed.businessStrategies.length}`,
+);
+check(
+  'business point headings are not garbled',
+  parsed.competitiveStrengths.every((pt) => !/[A-Z]{3,}(?=[a-z])/.test(pt.heading)),
+);
+
 // --- Glossary wiring -------------------------------------------------------
 // Every glossaryKey referenced by a flag must exist, or hovering shows nothing.
 const flagKeys = analysis.metrics.flags.map((f) => f.glossaryKey).filter(Boolean) as string[];
