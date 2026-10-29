@@ -182,6 +182,12 @@ export function analyse(p: ParsedProspectus, now: Date = new Date()): DerivedMet
       }
     }
   }
+  // Fallback: some prospectuses state the post-IPO gearing in prose
+  // ("...reduce our gearing ratio from 2.8 times ... to 0.9 times") rather than
+  // in a clean pro forma table row. Use it when the table did not yield one.
+  if (gearingAfter === null && p.gearingAfterStated.value !== null) {
+    gearingAfter = p.gearingAfterStated.value;
+  }
   if (gearingBefore === null) {
     const withGearing = p.periods.filter((x) => x.gearing !== null);
     gearingBefore = withGearing.length

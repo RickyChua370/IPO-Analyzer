@@ -120,17 +120,23 @@ function parseCompanyName(idx: DocIndex): Field<string> {
   // punctuation that appears in real names — "&", ".", "'", "-", and
   // parentheses ("Ecosys (Malaysia) Berhad").
   const NAME = "[A-Z0-9(][A-Z0-9\\s&.'()-]";
+  // The legal-form suffix is spelt out ("BERHAD") on most covers but abbreviated
+  // ("BHD") on some (e.g. Big Caring Group Bhd). Accept either so the name is
+  // not dropped — which otherwise lets a weaker fallback latch onto an adviser's
+  // name like "RHB Investment Bank Berhad".
+  const SUFFIX = '(?:BERHAD|BHD)';
 
   // Strongest signal: the cover page introduces the company as
   //   "PROSPECTUS OF <NAME> BERHAD ("ABBREV" OR THE "COMPANY") ..."
   // Anchoring the match to end at the quoted abbreviation stops it from
   // running past BERHAD into body boilerplate like "...in connection with the
   // Bursa Malaysia Securities Berhad". The name may wrap a line and may begin
-  // with a digit ("99 SPEED MART") or a parenthesis.
+  // with a digit ("99 SPEED MART") or a parenthesis. The cover may also lead
+  // with "NOTICE ACCOMPANYING THE ELECTRONIC PROSPECTUS OF ...".
   const withAbbrev = findProse(
     idx,
     new RegExp(
-      `PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+BERHAD)\\s*\\(\\s*["“']`,
+      `PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+${SUFFIX})\\s*\\(\\s*["“']`,
       'i',
     ),
   );
@@ -141,7 +147,7 @@ function parseCompanyName(idx: DocIndex): Field<string> {
   // Next: "PROSPECTUS OF <NAME> BERHAD DATED <date>" — bounded by DATED.
   const beforeDated = findProse(
     idx,
-    new RegExp(`PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+BERHAD)\\s+DATED\\b`, 'i'),
+    new RegExp(`PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+${SUFFIX})\\s+DATED\\b`, 'i'),
   );
   if (beforeDated) {
     return field(tidyName(beforeDated.match[1]), { page: beforeDated.page, raw: beforeDated.match[0] });
@@ -152,7 +158,7 @@ function parseCompanyName(idx: DocIndex): Field<string> {
   // connective words which betray a sentence, not a name.
   const line = findLine(
     idx,
-    new RegExp(`^(${NAME}{2,70}?\\s+BERHAD)\\s*$`, 'i'),
+    new RegExp(`^(${NAME}{2,70}?\\s+${SUFFIX})\\s*$`, 'i'),
   );
   if (line && !/\b(in connection|listing|securities|comprising|dated|offer|public issue)\b/i.test(line.match[1])) {
     return field(tidyName(line.match[1]), { page: line.page, confidence: 'medium' });
@@ -161,7 +167,7 @@ function parseCompanyName(idx: DocIndex): Field<string> {
   // Weaker fallback: "PROSPECTUS OF <NAME> BERHAD" without the guards above.
   const hit = findProse(
     idx,
-    new RegExp(`(?:ELECTRONIC\\s+)?PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+BERHAD)\\b`, 'i'),
+    new RegExp(`(?:ELECTRONIC\\s+)?PROSPECTUS\\s+OF\\s+(${NAME}{2,80}?\\s+${SUFFIX})\\b`, 'i'),
   );
   if (hit && !/\b(in connection|listing on|securities berhad)\b/i.test(hit.match[1])) {
     return field(tidyName(hit.match[1]), { page: hit.page, confidence: 'medium', raw: hit.match[0] });
@@ -190,12 +196,21 @@ function tidyName(s: string): string {
       const lead = m ? m[1] : '';
       const core = m ? m[2] : word;
       const trail = m ? m[3] : '';
-      // Preserve acronyms/initialisms: all-caps tokens that are either very
-      // short or vowel-less (SLGC, YTL, MBSB, DKSH, KPJ). Title-case ordinary
-      // words that merely appear in full caps on the cover ("SPEED", "MART",
-      // "MALAYSIA").
-      const isAcronym =
-        /^[A-Z][A-Z0-9&.-]{1,4}$/.test(core) && (core.length <= 3 || !/[AEIOU]/.test(core));
+      // The legal-form suffix is a word, not an acronym: render "BERHAD"/"BHD"
+      // as "Berhad"/"Bhd" rather than leaving "BHD" upper-cased.
+      if (/^(?:BERHAD|BHD)$/i.test(core)) {
+        const cased = core.charAt(0).toUpperCase() + core.slice(1).toLowerCase();
+        return `${lead}${cased}${trail}`;
+      }
+      // Preserve acronyms/initialisms, but title-case short real words that
+      // merely appear in full caps on the cover ("SPEED", "MART", "MALAYSIA",
+      // "BIG"). The two are distinguished by vowel pattern: an acronym is
+      // vowel-less (SLGC, YTL, MBSB, DKSH, KPJ, RNG), all-vowels (AI), or a
+      // one/two-letter token; a real word mixes consonants and vowels.
+      const shortCaps = /^[A-Z][A-Z0-9&.-]{1,4}$/.test(core);
+      const vowelless = !/[AEIOU]/.test(core);
+      const allVowels = /^[AEIOU]+$/.test(core);
+      const isAcronym = shortCaps && (vowelless || allVowels || core.length <= 2);
       const cased = isAcronym ? core : core.charAt(0).toUpperCase() + core.slice(1).toLowerCase();
       return `${lead}${cased}${trail}`;
     })
@@ -209,14 +224,38 @@ function parseRegistrationNo(idx: DocIndex): Field<string> {
 }
 
 function parseListingBoard(idx: DocIndex): Field<string> {
-  if (/\bACE\s+Market\b/i.test(idx.flat)) {
-    const hit = findProse(idx, /\bACE\s+Market\b/i);
-    return field('ACE Market', { page: hit?.page });
+  // A prospectus may mention another entity's board in passing (e.g. a stray
+  // "ACE Market" in a corporate-history table describing a related company),
+  // so a first-match-wins scan is unsafe. Tie the board to *this* company's
+  // listing event, then fall back to the dominant board by frequency.
+
+  // Strongest signal: the board named in the listing/quotation statement, or
+  // the definitions-section gloss ("Main Market : Main Market of Bursa ...").
+  const listingStatements: [string, RegExp][] = [
+    ['ACE Market', /listing\s+of\s+(?:and\s+quotation\s+for\s+)?[^.]{0,120}?\bon\s+the\s+ACE\s+Market\b/i],
+    ['Main Market', /listing\s+of\s+(?:and\s+quotation\s+for\s+)?[^.]{0,120}?\bon\s+the\s+Main\s+Market\b/i],
+    ['LEAP Market', /listing\s+of\s+(?:and\s+quotation\s+for\s+)?[^.]{0,120}?\bon\s+the\s+LEAP\s+Market\b/i],
+    ['ACE Market', /^ACE\s+Market\s*:\s*ACE\s+Market\s+of\s+Bursa/im],
+    ['Main Market', /^Main\s+Market\s*:\s*Main\s+Market\s+of\s+Bursa/im],
+    ['LEAP Market', /^LEAP\s+Market\s*:\s*LEAP\s+Market\s+of\s+Bursa/im],
+  ];
+  for (const [label, re] of listingStatements) {
+    const hit = findProse(idx, re);
+    if (hit) return field(label, { page: hit.page, raw: hit.match[0] });
   }
-  if (/\bLEAP\s+Market\b/i.test(idx.flat)) return field('LEAP Market');
-  if (/\bMain\s+Market\b/i.test(idx.flat)) {
-    const hit = findProse(idx, /\bMain\s+Market\b/i);
-    return field('Main Market', { page: hit?.page });
+
+  // Fallback: the issuer's own board dominates the document, so count mentions
+  // and take the most frequent. This resists a lone stray reference to another
+  // company's board.
+  const counts: [string, number][] = [
+    ['ACE Market', (idx.flat.match(/\bACE\s+Market\b/gi) ?? []).length],
+    ['Main Market', (idx.flat.match(/\bMain\s+Market\b/gi) ?? []).length],
+    ['LEAP Market', (idx.flat.match(/\bLEAP\s+Market\b/gi) ?? []).length],
+  ];
+  const [label, n] = counts.sort((a, b) => b[1] - a[1])[0];
+  if (n > 0) {
+    const hit = findProse(idx, new RegExp(`\\b${label.replace(' ', '\\s+')}\\b`, 'i'));
+    return field(label, { page: hit?.page, confidence: 'medium' });
   }
   return missing<string>();
 }
@@ -367,11 +406,17 @@ function parseIpoPrice(idx: DocIndex): Field<number> {
     /IPO\s+Price\s+per\s+Share\s+RM\s?([\d.]+)/i,
     /IPO\s+Price\s+of\s+RM\s?([\d.]+)/i,
     /at\s+our\s+IPO\s+Price\s+of\s+RM\s?([\d.]+)/i,
-    /issue\s+price\s+of\s+RM\s?([\d.]+)\s+per\s+(?:share|unit)/i,
     // Main Market book-built IPOs quote a "Retail Price" / "Final Retail Price".
     /(?:Final\s+)?Retail\s+Price\s*\(RM\)\s*([\d.]+)/i,
     /(?:Final\s+)?Retail\s+Price\s+of\s+RM\s?([\d.]+)/i,
+    // "Retail Price : Initial price of RM1.08 per Issue Share" (Big Caring Group)
+    /Retail\s+Price\s*:?\s*Initial\s+price\s+of\s+RM\s?([\d.]+)\s+per\s+(?:Issue\s+)?Share/i,
     /Institutional\s+Price\s+of\s+RM\s?([\d.]+)/i,
+    // Loose fallback LAST: a bare "issue price of RMx per share" also appears in
+    // unrelated historical share-subscription prose ("70 ordinary shares at an
+    // issue price of RM1 per share"), so it must not outrank the forms above.
+    /(?:IPO|Issue|Retail)\s+[Pp]rice[^.]{0,40}?issue\s+price\s+of\s+RM\s?([\d.]+)\s+per\s+(?:issue\s+)?(?:share|unit)/i,
+    /issue\s+price\s+of\s+RM\s?([\d.]+)\s+per\s+(?:share|unit)/i,
   ];
   for (const re of patterns) {
     const hit = findProse(idx, re);
@@ -388,7 +433,10 @@ function parseMarketCap(idx: DocIndex): Field<number> {
   // to ringgit. Handles million/billion and the "will be / of / is" variants.
   const proseUnit = [
     /total\s+market\s+capitalisation\s+of\s+our\s+Company\s+upon\s+(?:our\s+)?Listing\s+(?:would\s+be\s+|is\s+|will\s+be\s+)?(?:approximately\s+)?RM\s?([\d.,]+)\s*(million|billion)/i,
-    /market\s+capitalisation\s+(?:upon\s+(?:our\s+)?Listing\s+)?(?:would\s+be\s+|is\s+|will\s+be\s+|of\s+)?(?:approximately\s+)?RM\s?([\d.,]+)\s*(million|billion)/i,
+    // "market capitalisation of our Company upon our Listing would be
+    // approximately RM8.0 billion" (Big Caring Group) — allow an optional
+    // "of our Company" clause between "capitalisation" and "upon our Listing".
+    /market\s+capitalisation\s+(?:of\s+our\s+Company\s+)?(?:upon\s+(?:our\s+)?Listing\s+)?(?:would\s+be\s+|is\s+|will\s+be\s+|of\s+)?(?:approximately\s+)?RM\s?([\d.,]+)\s*(million|billion)/i,
   ];
   for (const re of proseUnit) {
     const hit = findProse(idx, re);
@@ -449,6 +497,10 @@ function parsePeMultiple(idx: DocIndex): Field<number> {
     /PE\s+Multiple\s+of\s+our\s+IPO\s+Price\s+of\s+approximately\s+([\d.]+)\s+times/i,
     /PE\s+Multiple\s+of\s+(?:approximately\s+)?([\d.]+)\s+times/i,
     /price[-\s]to[-\s]earnings\s+multiple\s+of\s+(?:approximately\s+)?([\d.]+)\s+times/i,
+    // "Price-to-earnings multiple : 41.5 times" and
+    // "price-to-earnings multiple ("PE Multiple") of 41.5 times" (Big Caring Group)
+    /price[-\s]to[-\s]earnings\s+multiple\s*(?:\(\s*["“']?PE\s+Multiple["”']?\s*\))?\s*:?\s*(?:of\s+)?(?:approximately\s+)?([\d.]+)\s+times/i,
+    /PE\s+Multiple\s*["”']?\s*\)?\s*(?:of\s+)?(?:approximately\s+)?([\d.]+)\s+times/i,
   ];
   for (const re of patterns) {
     const hit = findProse(idx, re);
@@ -461,12 +513,20 @@ function parsePeMultiple(idx: DocIndex): Field<number> {
 }
 
 function parseDilution(idx: DocIndex): Field<number> {
-  const hit = findProse(
-    idx,
+  const patterns: RegExp[] = [
     /Dilution\s+in\s+pro\s+forma\s+NA\s+per\s+Share\s+as\s+a\s+percentage\s+of\s+our\s+IPO\s+Price\s+([\d.]+)%/i,
-  );
-  const v = toNumber(hit?.match[1]);
-  if (hit && v !== null) return field(v, { page: hit.page, raw: hit.match[0] });
+    // "Dilution in the pro forma consolidated net assets per Share to new
+    // investors as a percentage of the Final Retail Price ... 85.2%"
+    // (Big Caring Group). The clause between the label and the percent wraps,
+    // so match loosely up to the trailing percentage.
+    /Dilution\s+in\s+the\s+pro\s+forma\s+consolidated\s+net\s+assets[^%]{0,160}?\(A\s*[–-]\s*B\)\s*\/\s*\(A\)\s*([\d.]+)%/i,
+    /Dilution\s+in\s+(?:the\s+)?pro\s+forma[^%]{0,180}?as\s+a\s+percentage\s+of\s+(?:our\s+IPO\s+Price|the\s+(?:Final\s+)?Retail\s+Price)[^%]{0,80}?([\d.]+)%/i,
+  ];
+  for (const re of patterns) {
+    const hit = findProse(idx, re);
+    const v = toNumber(hit?.match[1]);
+    if (hit && v !== null && v > 0 && v <= 100) return field(v, { page: hit.page, raw: hit.match[0] });
+  }
   return missing<number>();
 }
 
@@ -1348,6 +1408,49 @@ function parseProForma(idx: DocIndex): ProFormaSnapshot[] {
   }
 
   return snapshots;
+}
+
+/**
+ * Latest audited total borrowings (RM'000).
+ *
+ * The financial-review tables print a "Total borrowings (RM'000)" row with one
+ * figure per reporting year; we take the last (most recent) column. This is the
+ * balance-sheet borrowings figure used in the Financial Health panel when the
+ * pro forma table — which some prospectuses lay out in a two-column format that
+ * defeats row extraction — is unavailable.
+ */
+function parseTotalBorrowings(idx: DocIndex): Field<number> {
+  const hits = findAllLines(idx, /^Total\s+borrowings\s*\(RM['’]?\s*000\)\s+[\d(]/i);
+  for (let k = hits.length - 1; k >= 0; k--) {
+    const nums = rowNumbers(hits[k].line).filter((n) => n !== null) as number[];
+    if (nums.length > 0) {
+      return field(nums[nums.length - 1], { page: hits[k].page, raw: hits[k].line });
+    }
+  }
+  return missing<number>();
+}
+
+/**
+ * Post-IPO gearing where the prospectus states it in prose rather than (or in
+ * addition to) a clean pro forma table row.
+ *
+ * The canonical phrasing is a before/after sentence:
+ *   "...is expected to reduce our gearing ratio from 2.8 times (as at ...) to
+ *    0.9 times as illustrated in Section 12.4..."
+ * The second figure is the post-IPO gearing. This is an explicit disclosure, so
+ * it is high-confidence and safe as a fallback for the pro forma "Gearing
+ * (times)" row.
+ */
+function parseGearingAfterStated(idx: DocIndex): Field<number> {
+  const hit = findProse(
+    idx,
+    /(?:reduce|decrease|lower|improve)\s+(?:our\s+)?gearing\s+ratio\s+from\s+([\d.]+)\s+times[^.]{0,80}?\bto\s+([\d.]+)\s+times/i,
+  );
+  const v = toNumber(hit?.match[2]);
+  if (hit && v !== null && v >= 0 && v < 100) {
+    return field(v, { page: hit.page, raw: hit.match[0] });
+  }
+  return missing<number>();
 }
 
 // ---------------------------------------------------------------------------
@@ -2405,6 +2508,8 @@ export function parseProspectus(pages: string[], sourceFiles: string[] = []): Pa
 
     periods: safe(() => parseFinancialPeriods(idx), []),
     proForma,
+    totalBorrowings: safe(() => parseTotalBorrowings(idx), missing<number>()),
+    gearingAfterStated: safe(() => parseGearingAfterStated(idx), missing<number>()),
 
     orderBook: ob.value,
     orderBookRaw: ob.raw,

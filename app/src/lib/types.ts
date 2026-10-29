@@ -247,6 +247,19 @@ export interface ParsedProspectus {
   // Financials
   periods: FinancialPeriod[];
   proForma: ProFormaSnapshot[];
+  /**
+   * Latest audited total borrowings (RM'000), taken from the financial-review
+   * "Total borrowings" row. Used for the Financial Health "Borrowings" line
+   * when the pro forma balance-sheet table is absent or unparseable.
+   */
+  totalBorrowings: Field<number>;
+  /**
+   * Post-IPO gearing (times) where the prospectus states it in prose, e.g.
+   * "expected to reduce our gearing ratio from 2.8 times ... to 0.9 times".
+   * A fallback for the pro forma "Gearing (times)" row, which some layouts
+   * present in a two-column format that defeats row extraction.
+   */
+  gearingAfterStated: Field<number>;
 
   // Operational
   orderBook: Field<number>;
