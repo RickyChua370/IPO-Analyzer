@@ -408,9 +408,11 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                     <Term k="borrowings">Borrowings</Term>
                   </th>
                   <td>
-                    {p.proForma.length > 0
+                    {p.proForma.length > 0 && p.proForma[p.proForma.length - 1].borrowings !== null
                       ? `RM${fmtThousands(p.proForma[p.proForma.length - 1].borrowings)}k`
-                      : DASH}
+                      : p.totalBorrowings.value !== null
+                        ? `RM${fmtThousands(p.totalBorrowings.value)}k`
+                        : DASH}
                   </td>
                 </tr>
                 {m.relevance.customerConcentration !== 'not_applicable' && (
