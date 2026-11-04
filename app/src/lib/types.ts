@@ -192,6 +192,56 @@ export interface ProFormaSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// REIT-specific data
+// ---------------------------------------------------------------------------
+
+/**
+ * Facts that only exist for a Real Estate Investment Trust listing.
+ *
+ * A REIT prospectus does not fit the equity-IPO shape: the trust issues "Units"
+ * that are sold by a Sponsor (no new money to the trust), it has a Manager
+ * rather than a board of its own, and its earnings are judged on Net Property
+ * Income (NPI), distributable income and distribution yield rather than PAT and
+ * PE. Present only when the parser recognised a REIT.
+ */
+export interface ReitInfo {
+  /** Full legal name of the trust. */
+  trustName: Field<string>;
+  manager: Field<string>;
+  sponsor: Field<string>;
+  /** Independent valuation of the whole portfolio, RM. */
+  appraisedValueRM: Field<number>;
+  /** Total purchase consideration paid to the Sponsor/vendors, RM. */
+  acquisitionPriceRM: Field<number>;
+  /** Units the stabilising manager may over-allot. */
+  overAllotmentUnits: Field<number>;
+  /** True when the prospectus states the trust receives none of the offer proceeds. */
+  noProceedsToTrust: boolean;
+  /** Listing costs borne by the trust from its own funds, RM'000. */
+  listingCostsRM000: Field<number>;
+  /** Forecast for the first (partial) financial period. RM'000 unless stated. */
+  projectedRevenue: Field<number>;
+  projectedNpi: Field<number>;
+  projectedDistributableIncome: Field<number>;
+  /** Annualised, in sen. */
+  projectedDpuSen: Field<number>;
+  /** Annualised yield on the retail price, %. */
+  projectedYieldPct: Field<number>;
+  /** Share of distributable income the Manager intends to pay out, %. */
+  distributionPolicyPct: Field<number>;
+  /** Borrowings as a % of total asset value at listing. */
+  gearingPct: Field<number>;
+  /** Regulatory ceiling on borrowings as a % of total asset value. */
+  gearingLimitPct: Field<number>;
+  /** How the Manager is paid, in the prospectus' words. */
+  managerFees: Field<string>;
+  /** Net property income per period, aligned to `ParsedProspectus.periods`. */
+  npi: (number | null)[];
+  /** Distributable income per period, aligned to `ParsedProspectus.periods`. */
+  distributableIncome: (number | null)[];
+}
+
+// ---------------------------------------------------------------------------
 // Top-level parsed document
 // ---------------------------------------------------------------------------
 
@@ -266,6 +316,9 @@ export interface ParsedProspectus {
 
   // Risk
   riskFactors: string[];
+
+  /** Present only for REIT prospectuses (see ReitInfo). */
+  reit?: ReitInfo;
 
   // Meta
   /** Total pages across all uploaded parts. */
