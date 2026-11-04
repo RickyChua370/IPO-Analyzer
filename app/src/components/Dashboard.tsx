@@ -21,7 +21,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { Analysis, Flag, ParsedProspectus, RelevanceProfile } from '../lib/types.ts';
+import type { Analysis, Flag, ParsedProspectus, ReitInfo, RelevanceProfile } from '../lib/types.ts';
 import { Term } from './Term.tsx';
 import { Editable } from './Editable.tsx';
 import {
@@ -82,10 +82,15 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
   }, {});
 
   // Chart series: revenue and profit by period, with stub marked.
-  const chartData = p.periods.map((period) => ({
+  const reit = p.reit;
+  const unitWord = reit ? 'Units' : 'shares';
+  // A REIT's reported profit is inflated by property revaluations, so its
+  // chart shows revenue, net property income and distributable income instead.
+  const chartData = p.periods.map((period, i) => ({
     name: period.label.replace('FYE ', "'").replace('FPE ', "'") + (period.isStub ? '*' : ''),
     Revenue: period.revenue,
-    PAT: period.pat,
+    PAT: reit ? (reit.distributableIncome[i] ?? null) : period.pat,
+    NPI: period.grossProfit,
     'GP margin': period.gpMargin,
     'PAT margin': period.patMargin,
   }));
@@ -148,19 +153,21 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
           <p className="head__desc">{p.businessDescription.value}</p>
         )}
 
+        {p.reit && <ReitSummary reit={p.reit} ipoPrice={p.ipoPrice.value} />}
+
         <BusinessOverview parsed={p} />
 
         {/* Headline metrics */}
         <div className="kpis">
           <Kpi
-            label="IPO price"
+            label={reit ? 'Retail price' : 'IPO price'}
             glossary="ipoPrice"
             value={fmtPrice(p.ipoPrice.value)}
             raw={p.ipoPrice.value}
             path="ipoPrice"
             onEdit={onEdit}
             edited={p.ipoPrice.edited}
-            unit="RM per share"
+            unit={reit ? 'RM per Unit' : 'RM per share'}
           />
           <Kpi
             label="Market cap"
@@ -172,18 +179,40 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
             edited={p.marketCap.edited}
             unit="RM"
           />
+          {reit ? (
+            <Kpi
+              label="Projected yield"
+              glossary="distributionYield"
+              value={fmtPct(reit.projectedYieldPct.value, 2)}
+            />
+          ) : (
+            <Kpi
+              label="PE multiple"
+              glossary="peMultiple"
+              value={fmtTimes(p.peMultiple.value, 1)}
+              raw={p.peMultiple.value}
+              path="peMultiple"
+              onEdit={onEdit}
+              edited={p.peMultiple.edited}
+              unit="times"
+            />
+          )}
           <Kpi
-            label="PE multiple"
-            glossary="peMultiple"
-            value={fmtTimes(p.peMultiple.value, 1)}
-            raw={p.peMultiple.value}
-            path="peMultiple"
-            onEdit={onEdit}
-            edited={p.peMultiple.edited}
-            unit="times"
+            label={reit ? 'Price-to-NAV' : 'Price-to-book'}
+            glossary="priceToBook"
+            value={fmtTimes(m.priceToBook, reit ? 2 : 1)}
+            derived
           />
-          <Kpi label="Price-to-book" glossary="priceToBook" value={fmtTimes(m.priceToBook, 1)} derived />
-          {m.relevance.orderBook !== 'not_applicable' ? (
+          {reit ? (
+            <>
+              <Kpi
+                label="Projected DPU"
+                glossary="dpu"
+                value={reit.projectedDpuSen.value !== null ? `${reit.projectedDpuSen.value.toFixed(2)} sen` : DASH}
+              />
+              <Kpi label="Sponsor stake" glossary="founderRetained" value={fmtPct(m.founderRetainedPct)} derived />
+            </>
+          ) : m.relevance.orderBook !== 'not_applicable' ? (
             <>
               <Kpi
                 label="Order book"
@@ -245,7 +274,7 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                     {fmtThousands(
                       (p.publicIssueShares.value ?? 0) + (p.offerForSaleShares.value ?? 0) || null,
                     )}{' '}
-                    shares
+                    {unitWord}
                     {p.enlargedShares.value && (
                       <span className="muted">
                         {' '}
@@ -283,28 +312,30 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                     <Term k="retailBallotPct">Retail ballot pool</Term>
                   </th>
                   <td>
-                    {fmtThousands(m.retailBallotShares)} shares
+                    {fmtThousands(m.retailBallotShares)} {unitWord}
                     <span className="muted"> ({fmtPct(m.retailBallotPct, 2)} of company)</span>
                   </td>
                 </tr>
                 <tr>
                   <th>
-                    <Term k="enlargedShares">Shares after listing</Term>
+                    <Term k="enlargedShares">{reit ? 'Units after listing' : 'Shares after listing'}</Term>
                   </th>
                   <td>{fmtThousands(p.enlargedShares.value)}</td>
                 </tr>
+                {!reit && (
+                  <tr>
+                    <th>
+                      <Term k="dilution">Dilution to new investors</Term>
+                    </th>
+                    <td>
+                      {fmtPct(p.dilutionPct.value)}
+                      <span className="muted"> of IPO price</span>
+                    </td>
+                  </tr>
+                )}
                 <tr>
                   <th>
-                    <Term k="dilution">Dilution to new investors</Term>
-                  </th>
-                  <td>
-                    {fmtPct(p.dilutionPct.value)}
-                    <span className="muted"> of IPO price</span>
-                  </td>
-                </tr>
-                <tr>
-                  <th>
-                    <Term k="naPerShare">NA per share after IPO</Term>
+                    <Term k="naPerShare">{reit ? 'NAV per Unit at listing' : 'NA per share after IPO'}</Term>
                   </th>
                   <td>{p.naPerShareAfter.value !== null ? `RM${p.naPerShareAfter.value.toFixed(2)}` : DASH}</td>
                 </tr>
@@ -345,7 +376,29 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
             <h2 className="h2">
               <Term k="proceedsToGrowth">Where the money goes</Term>
             </h2>
-            {proceedsData.length > 0 ? (
+            {reit ? (
+              <p className="callout">
+                {reit.noProceedsToTrust ? (
+                  <>
+                    <strong>None of the offer proceeds reach the trust.</strong> No new Units are
+                    issued, so the cash from the Offering
+                    {p.offerForSaleGrossRM.value !== null && (
+                      <> (about {fmtRM(p.offerForSaleGrossRM.value, { compact: true })} at the retail price)</>
+                    )}{' '}
+                    goes to the Sponsor.
+                  </>
+                ) : (
+                  <>Utilisation of proceeds is not applicable to this REIT.</>
+                )}
+                {reit.listingCostsRM000.value !== null && (
+                  <>
+                    {' '}
+                    The trust pays about RM{fmtThousands(reit.listingCostsRM000.value)}k of listing costs
+                    from its own operating cash.
+                  </>
+                )}
+              </p>
+            ) : proceedsData.length > 0 ? (
               <>
                 <div className="chart chart--short">
                   <ResponsiveContainer width="100%" height={150}>
@@ -380,29 +433,46 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
             <h2 className="h2">Financial health</h2>
             <table className="kv">
               <tbody>
-                <tr>
-                  <th>
-                    <Term k="gearing">Gearing</Term>
-                  </th>
-                  <td>
-                    {fmtTimes(m.gearingBefore)} <span className="muted">before</span> →{' '}
-                    <strong>{fmtTimes(m.gearingAfter)}</strong> <span className="muted">after IPO</span>
-                  </td>
-                </tr>
-                <tr>
-                  <th>
-                    <Term k="currentRatio">Current ratio</Term>
-                  </th>
-                  <td>{fmtTimes(m.latestCurrentRatio)}</td>
-                </tr>
-                <tr>
-                  <th>
-                    <Term k="receivablesDays">Customers pay in</Term>
-                  </th>
-                  <td>
-                    {m.latestReceivablesDays !== null ? `${m.latestReceivablesDays} days` : DASH}
-                  </td>
-                </tr>
+                {reit ? (
+                  <tr>
+                    <th>
+                      <Term k="gearing">Gearing</Term>
+                    </th>
+                    <td>
+                      <strong>{fmtPct(reit.gearingPct.value)}</strong>{' '}
+                      <span className="muted">
+                        of total assets at listing
+                        {reit.gearingLimitPct.value !== null && ` (cap ${reit.gearingLimitPct.value}%)`}
+                      </span>
+                    </td>
+                  </tr>
+                ) : (
+                  <>
+                    <tr>
+                      <th>
+                        <Term k="gearing">Gearing</Term>
+                      </th>
+                      <td>
+                        {fmtTimes(m.gearingBefore)} <span className="muted">before</span> →{' '}
+                        <strong>{fmtTimes(m.gearingAfter)}</strong> <span className="muted">after IPO</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>
+                        <Term k="currentRatio">Current ratio</Term>
+                      </th>
+                      <td>{fmtTimes(m.latestCurrentRatio)}</td>
+                    </tr>
+                    <tr>
+                      <th>
+                        <Term k="receivablesDays">Customers pay in</Term>
+                      </th>
+                      <td>
+                        {m.latestReceivablesDays !== null ? `${m.latestReceivablesDays} days` : DASH}
+                      </td>
+                    </tr>
+                  </>
+                )}
                 <tr>
                   <th>
                     <Term k="borrowings">Borrowings</Term>
@@ -421,12 +491,14 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                     <td>{fmtPct(m.topCustomerConcentration)} of revenue</td>
                   </tr>
                 )}
-                <tr>
-                  <th>
-                    <Term k="employees">Employees</Term>
-                  </th>
-                  <td>{fmtThousands(p.employees.value)}</td>
-                </tr>
+                {!reit && (
+                  <tr>
+                    <th>
+                      <Term k="employees">Employees</Term>
+                    </th>
+                    <td>{fmtThousands(p.employees.value)}</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -450,9 +522,26 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
               <ChartTooltip />
               <Legend iconSize={9} wrapperStyle={{ fontSize: 11 }} />
               <Bar yAxisId="rm" dataKey="Revenue" fill="#3d6ea8" radius={[2, 2, 0, 0]} />
-              <Bar yAxisId="rm" dataKey="PAT" fill="#2f8f5b" radius={[2, 2, 0, 0]} />
-              <Line yAxisId="pct" type="monotone" dataKey="GP margin" stroke="#c2683a" strokeWidth={2} dot={{ r: 2 }} />
-              <Line yAxisId="pct" type="monotone" dataKey="PAT margin" stroke="#8a5fa8" strokeWidth={2} dot={{ r: 2 }} />
+              {reit && <Bar yAxisId="rm" dataKey="NPI" name="Net property income" fill="#6b9fd0" radius={[2, 2, 0, 0]} />}
+              <Bar
+                yAxisId="rm"
+                dataKey="PAT"
+                name={reit ? 'Distributable income' : 'PAT'}
+                fill="#2f8f5b"
+                radius={[2, 2, 0, 0]}
+              />
+              <Line
+                yAxisId="pct"
+                type="monotone"
+                dataKey="GP margin"
+                name={reit ? 'NPI margin' : 'GP margin'}
+                stroke="#c2683a"
+                strokeWidth={2}
+                dot={{ r: 2 }}
+              />
+              {!reit && (
+                <Line yAxisId="pct" type="monotone" dataKey="PAT margin" stroke="#8a5fa8" strokeWidth={2} dot={{ r: 2 }} />
+              )}
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -460,8 +549,13 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
         <div className="minirow">
           <MiniStat label="Revenue CAGR" glossary="cagr" value={fmtPct(m.revenueCagr)} note="full years only" />
           <MiniStat label="Latest revenue growth" value={fmtSignedPct(m.revenueGrowthLatest)} note="year on year" />
-          <MiniStat label="Latest profit growth" glossary="pat" value={fmtSignedPct(m.patGrowthLatest)} note="year on year" />
-          <MiniStat label="Margin trend" glossary="marginTrend" value={m.marginTrend ?? DASH} note={m.gpMarginChange !== null ? `${m.gpMarginChange >= 0 ? '+' : ''}${m.gpMarginChange.toFixed(1)} pp overall` : ''} />
+          <MiniStat
+            label={reit ? 'Latest distributable income growth' : 'Latest profit growth'}
+            glossary={reit ? 'distributableIncome' : 'pat'}
+            value={fmtSignedPct(m.patGrowthLatest)}
+            note="year on year"
+          />
+          <MiniStat label={reit ? 'NPI margin trend' : 'Margin trend'} glossary="marginTrend" value={m.marginTrend ?? DASH} note={m.gpMarginChange !== null ? `${m.gpMarginChange >= 0 ? '+' : ''}${m.gpMarginChange.toFixed(1)} pp overall` : ''} />
         </div>
 
         {/* Ownership */}
@@ -472,7 +566,7 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
               <tbody>
                 <tr>
                   <th>
-                    <Term k="founderRetained">Largest holder after IPO</Term>
+                    <Term k="founderRetained">{reit ? 'Sponsor holding after listing' : 'Largest holder after IPO'}</Term>
                   </th>
                   <td>
                     {m.largestShareholder?.name ?? DASH}{' '}
@@ -487,7 +581,7 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                 </tr>
                 <tr>
                   <th>
-                    <Term k="independentDirector">Board independence</Term>
+                    <Term k="independentDirector">{reit ? 'Manager board independence' : 'Board independence'}</Term>
                   </th>
                   <td>
                     {fmtPct(m.independentDirectorRatio, 0)}
@@ -499,7 +593,7 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                 </tr>
                 <tr>
                   <th>
-                    <Term k="dividendPolicy">Dividend policy</Term>
+                    <Term k="dividendPolicy">{reit ? 'Distribution policy' : 'Dividend policy'}</Term>
                   </th>
                   <td>{p.dividendPolicy.value ?? DASH}</td>
                 </tr>
@@ -556,26 +650,50 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
               </tr>
             </thead>
             <tbody>
-              <FinRow label="Revenue" glossary="revenue" periods={p.periods} k="revenue" onEdit={onEdit} />
-              <FinRow label="Gross profit" glossary="grossProfit" periods={p.periods} k="grossProfit" onEdit={onEdit} />
-              <FinRow label="Other operating income" periods={p.periods} k="otherIncome" onEdit={onEdit} />
-              <FinRow label="Profit before tax" glossary="pbt" periods={p.periods} k="pbt" onEdit={onEdit} />
-              <FinRow label="Profit after tax" glossary="pat" periods={p.periods} k="pat" onEdit={onEdit} />
-              <FinRow label="EPS (sen)" glossary="eps" periods={p.periods} k="eps" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
-              <FinRow label="GP margin (%)" glossary="gpMargin" periods={p.periods} k="gpMargin" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
-              <FinRow label="PAT margin (%)" glossary="patMargin" periods={p.periods} k="patMargin" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
-              <FinRow label="Gearing (times)" glossary="gearing" periods={p.periods} k="gearing" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
-              <FinRow label="Current ratio (times)" glossary="currentRatio" periods={p.periods} k="currentRatio" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
-              <FinRow label="Receivables (days)" glossary="receivablesDays" periods={p.periods} k="receivablesDays" onEdit={onEdit} />
-              <FinRow label="Dividends paid" periods={p.periods} k="dividends" onEdit={onEdit} />
+              {reit ? (
+                <>
+                  <FinRow label="Total revenue" glossary="revenue" periods={p.periods} k="revenue" onEdit={onEdit} />
+                  <FinRow label="Net property income (NPI)" glossary="npi" periods={p.periods} k="grossProfit" onEdit={onEdit} />
+                  <FinRow label="NPI margin (%)" glossary="marginTrend" periods={p.periods} k="gpMargin" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(1))} />
+                  <FinRow label="Profit before tax (incl. property revaluation)" glossary="pbt" periods={p.periods} k="pbt" onEdit={onEdit} />
+                  <FinRow label="Total comprehensive income" glossary="pat" periods={p.periods} k="pat" onEdit={onEdit} />
+                  <tr>
+                    <th>
+                      <Term k="distributableIncome">Distributable income</Term>
+                    </th>
+                    {p.periods.map((period, i) => (
+                      <td key={period.label} className="num">
+                        {fmtThousands(reit.distributableIncome[i] ?? null)}
+                      </td>
+                    ))}
+                  </tr>
+                </>
+              ) : (
+                <>
+                  <FinRow label="Revenue" glossary="revenue" periods={p.periods} k="revenue" onEdit={onEdit} />
+                  <FinRow label="Gross profit" glossary="grossProfit" periods={p.periods} k="grossProfit" onEdit={onEdit} />
+                  <FinRow label="Other operating income" periods={p.periods} k="otherIncome" onEdit={onEdit} />
+                  <FinRow label="Profit before tax" glossary="pbt" periods={p.periods} k="pbt" onEdit={onEdit} />
+                  <FinRow label="Profit after tax" glossary="pat" periods={p.periods} k="pat" onEdit={onEdit} />
+                  <FinRow label="EPS (sen)" glossary="eps" periods={p.periods} k="eps" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
+                  <FinRow label="GP margin (%)" glossary="gpMargin" periods={p.periods} k="gpMargin" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
+                  <FinRow label="PAT margin (%)" glossary="patMargin" periods={p.periods} k="patMargin" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
+                  <FinRow label="Gearing (times)" glossary="gearing" periods={p.periods} k="gearing" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
+                  <FinRow label="Current ratio (times)" glossary="currentRatio" periods={p.periods} k="currentRatio" onEdit={onEdit} fmt={(v) => (v === null ? DASH : v.toFixed(2))} />
+                  <FinRow label="Receivables (days)" glossary="receivablesDays" periods={p.periods} k="receivablesDays" onEdit={onEdit} />
+                  <FinRow label="Dividends paid" periods={p.periods} k="dividends" onEdit={onEdit} />
+                </>
+              )}
             </tbody>
           </table>
         </div>
         {m.stubPeriod && (
           <p className="note">
-            * <Term k="stubPeriod">{m.stubPeriod.label}</Term> is a part-year period. It is excluded
-            from growth and CAGR calculations, and should not be compared directly with a full
-            financial year.
+            * <Term k="stubPeriod">{p.periods.filter((x) => x.isStub).map((x) => x.label).join(' and ')}</Term>{' '}
+            {p.periods.filter((x) => x.isStub).length > 1 ? 'are part-year periods' : 'is a part-year period'}.{' '}
+            {p.periods.filter((x) => x.isStub).length > 1 ? 'They are' : 'It is'} excluded from growth and
+            CAGR calculations, and should not be compared directly with a full financial year.
+            {reit && ' Figures are pro forma — as if the trust had owned the properties throughout.'}
           </p>
         )}
 
@@ -627,13 +745,13 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
 
         <div className="cols">
           <div className="col">
-            <h3 className="h3">Share allocation</h3>
+            <h3 className="h3">{reit ? 'Unit allocation' : 'Share allocation'}</h3>
             {p.allocations.length > 0 ? (
               <table className="data data--compact">
                 <thead>
                   <tr>
                     <th>Allocation</th>
-                    <th className="num">Shares</th>
+                    <th className="num">{reit ? 'Units' : 'Shares'}</th>
                     <th className="num">%</th>
                   </tr>
                 </thead>
@@ -648,7 +766,9 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                             <Term k={tranche === 'public_issue' ? 'publicIssue' : 'offerForSale'}>
                               {tranche === 'public_issue'
                                 ? 'Public Issue (to company)'
-                                : 'Offer for Sale (to owners)'}
+                                : reit
+                                  ? 'Offer Units (sold by the Sponsor)'
+                                  : 'Offer for Sale (to owners)'}
                             </Term>
                           </th>
                         </tr>
@@ -723,6 +843,10 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
                   </tr>
                 </tbody>
               </table>
+            ) : reit ? (
+              <p className="muted">
+                Not applicable — the trust issues no new Units and receives no proceeds from the Offering.
+              </p>
             ) : (
               <p className="muted">Not found.</p>
             )}
@@ -731,7 +855,7 @@ export function Dashboard({ analysis, onEdit, onSave, saved }: DashboardProps) {
 
         <div className="cols">
           <div className="col">
-            <h3 className="h3">Board &amp; management</h3>
+            <h3 className="h3">{reit ? 'Manager’s board & management' : 'Board & management'}</h3>
             {p.directors.length + p.management.length > 0 ? (
               <table className="data data--compact">
                 <tbody>
@@ -878,6 +1002,59 @@ function MiniStat({
  * each claim is verifiable; the whole block is omitted only if nothing at all
  * was found, so it never shows an empty shell.
  */
+/**
+ * REIT-only facts that have no equivalent on an equity IPO: the Manager and
+ * Sponsor, the independent valuation versus what the Sponsor was paid, and
+ * how the Manager is paid (relevant because fees come straight out of NPI).
+ */
+function ReitSummary({ reit, ipoPrice }: { reit: ReitInfo; ipoPrice: number | null }) {
+  const premium =
+    reit.appraisedValueRM.value && reit.acquisitionPriceRM.value
+      ? ((reit.acquisitionPriceRM.value - reit.appraisedValueRM.value) / reit.appraisedValueRM.value) * 100
+      : null;
+  return (
+    <section className="biz">
+      <h2 className="h2">
+        REIT structure <span className="h2__note">Units sold by the Sponsor, not new money raised by the trust</span>
+      </h2>
+      <div className="biz__facts">
+        <div className="biz__fact">
+          <div className="biz__fact-label">Manager</div>
+          <div className="biz__fact-value">{reit.manager.value ?? DASH}</div>
+        </div>
+        <div className="biz__fact">
+          <div className="biz__fact-label">Sponsor</div>
+          <div className="biz__fact-value">{reit.sponsor.value ?? DASH}</div>
+        </div>
+        <div className="biz__fact">
+          <div className="biz__fact-label">Portfolio paid vs. independent valuation</div>
+          <div className="biz__fact-value">
+            {fmtRM(reit.acquisitionPriceRM.value, { compact: true })} paid for a portfolio valued at{' '}
+            {fmtRM(reit.appraisedValueRM.value, { compact: true })}
+            {premium !== null && (
+              <span className="muted"> ({premium >= 0 ? '+' : ''}{premium.toFixed(1)}% vs. valuation)</span>
+            )}
+          </div>
+        </div>
+        <div className="biz__fact">
+          <div className="biz__fact-label">How the Manager is paid</div>
+          <div className="biz__fact-value">{reit.managerFees.value ?? DASH}</div>
+        </div>
+        {reit.projectedDpuSen.value !== null && ipoPrice !== null && (
+          <div className="biz__fact">
+            <div className="biz__fact-label">Projected first-year distribution</div>
+            <div className="biz__fact-value">
+              {reit.projectedDpuSen.value.toFixed(2)} sen per Unit ≈{' '}
+              {fmtPct(reit.projectedYieldPct.value, 2)} yield on the RM{ipoPrice.toFixed(2)} retail price
+              (Manager&rsquo;s projection, not guaranteed)
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function BusinessOverview({ parsed: p }: { parsed: ParsedProspectus }) {
   const hasModel = Boolean(p.businessModel.value);
   const hasProducts = Boolean(p.productsServices.value);
@@ -1038,6 +1215,12 @@ function ParseAudit({
   }
   if (relevance.customerConcentration === 'not_applicable') {
     naKeys.add('customerConcentration');
+  }
+  if (parsed.reit) {
+    // A REIT has no earnings multiple, no dilution figure, no proceeds table and no staff.
+    for (const k of ['peMultiple', 'dilutionPct', 'proceedsTotal', 'employees', 'productsServices', 'marketPosition']) {
+      naKeys.add(k);
+    }
   }
 
   const missingList = scalars

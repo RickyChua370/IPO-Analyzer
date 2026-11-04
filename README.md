@@ -66,7 +66,7 @@ Both pages are print-optimised: **Print / Save as PDF** yields a genuine two-pag
 
 ## Scope
 
-**Supported:** text-based Bursa Malaysia ACE and Main Market e-prospectuses, single or multi-part.
+**Supported:** text-based Bursa Malaysia ACE and Main Market e-prospectuses, single or multi-part, including equity IPOs and REIT listings (Units sold by a Sponsor, Manager/Trustee structure, pro forma NPI and distributable income rather than PAT).
 
 **Not supported by design:**
 - Scanned/image-only PDFs (no OCR — browser OCR is slow and unreliable)
@@ -93,7 +93,8 @@ npm run build        # type-check and build to app/dist
 Validated against a real prospectus (SLGC Berhad, 432 pages across 3 parts) with every expected value hand-verified against the source PDFs.
 
 - `npm run test:parser` — 23 checks: field extraction, financial table alignment, allocations, proceeds, pro forma, people, derived metrics, flag thresholds
-- `npm run test:render` — 44 checks: components render real data correctly, glossary completeness and wiring, edits recompute derived metrics, and no `null`/`NaN`/`undefined` ever reaches the markup
+- `npm run test:ioipg` — 57 checks against IOI PG REIT (Main Market, 898 pages across 6 parts): REIT detection, Manager/Sponsor identity, Retail/Institutional offering structure, pro forma NPI and distributable income, profit projection, gearing against the regulatory cap, and REIT-specific flag relevance
+- `npm run test:render` — 44 checks: components render real data correctly, glossary completeness and wiring, edits recompute derived metrics, and no `null`/`NaN`/`undefined` ever reaches the markup (plus a parallel 15-check pass over the REIT dashboard when the IOIPG fixture is present)
 
 `npm run fixture` regenerates the test fixture using the same pdf.js engine the browser uses, so the parser is developed and tested against exactly the text it will see at runtime.
 

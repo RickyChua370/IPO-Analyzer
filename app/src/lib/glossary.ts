@@ -539,6 +539,45 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     whyItMatters:
       'Scale gives the story a sense of proportion and a baseline to track growth against. It also hints at how much capital the business needs to run and how far the expansion plans would stretch it.',
   },
+
+  // --- REIT terms -------------------------------------------------------------
+  distributionYield: {
+    term: 'Distribution Yield',
+    short: 'The yearly cash payout per Unit as a percentage of the price you pay.',
+    plain:
+      'A REIT collects rent and pays most of it out to Unit holders. Divide that yearly payout per Unit by the Unit price and you get the yield. A 6.6% yield on RM0.96 means about 6.3 sen per Unit each year if the forecast holds.',
+    whyItMatters:
+      'For a REIT the payout is the main reason to own it, so yield is the number to weigh first. Note that a prospectus yield is a forecast, not a promise, and it is calculated at the offer price rather than at whatever the Unit trades for later.',
+    ruleOfThumb:
+      'Compare with the yields of already-listed Malaysian REITs and with fixed deposit or government bond rates. A much higher yield than peers can signal extra risk.',
+  },
+
+  dpu: {
+    term: 'DPU (Distribution per Unit)',
+    short: 'The cash a REIT pays out for each Unit you hold, in sen.',
+    plain:
+      'The REIT\'s distributable income divided by the number of Units. It is the REIT equivalent of a dividend per share.',
+    whyItMatters:
+      'It is the actual cash you receive. Check whether it is a full-year or part-year figure; prospectuses often annualise a short first period.',
+  },
+
+  npi: {
+    term: 'NPI (Net Property Income)',
+    short: 'Rent and other property income, minus the cost of running the properties.',
+    plain:
+      'Revenue from the buildings less property operating costs such as maintenance, utilities, quit rent and insurance — before the REIT\'s own financing and management costs.',
+    whyItMatters:
+      'It shows how well the properties themselves earn. A rising NPI margin means the portfolio is getting more profitable to run.',
+  },
+
+  distributableIncome: {
+    term: 'Distributable Income',
+    short: 'The cash profit a REIT can pay out to Unit holders.',
+    plain:
+      'A REIT\'s reported profit includes paper gains when its properties are revalued, which are not cash. Distributable income strips those out, leaving the income actually available for distribution.',
+    whyItMatters:
+      'It is a far better guide to payouts than reported profit, which can be several times larger in years when property values rise.',
+  },
 };
 
 /** Safe lookup used by the tooltip component. */

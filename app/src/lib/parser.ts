@@ -27,6 +27,7 @@ import {
   missing,
 } from './types.ts';
 import { type StitchedDocument, pageForOffset, stitch } from './textLayout.ts';
+import { applyReit, isReitProspectus } from './reit.ts';
 
 // ---------------------------------------------------------------------------
 // Low-level helpers
@@ -2319,6 +2320,17 @@ function safe<T>(fn: () => T, fallback: T): T {
 }
 
 export function parseProspectus(pages: string[], sourceFiles: string[] = []): ParsedProspectus {
+  const generic = parseGeneric(pages, sourceFiles);
+  // REIT prospectuses (Units, Manager, Sponsor, NPI/DPU) do not fit the
+  // equity-IPO shape the generic extractors assume, so overlay a dedicated
+  // REIT parse. Equity IPOs never reach this branch.
+  if (isReitProspectus(pages)) {
+    return safe(() => applyReit(generic, pages), generic);
+  }
+  return generic;
+}
+
+function parseGeneric(pages: string[], sourceFiles: string[]): ParsedProspectus {
   const idx = buildIndex(pages);
 
   const alloc = safe(() => parseAllocations(idx), {

@@ -77,7 +77,8 @@ function describeTrend(values: number[]): string | null {
 export function analyse(p: ParsedProspectus, now: Date = new Date()): DerivedMetrics {
   const fullPeriods = p.periods.filter((x) => !x.isStub);
   const latestFull = fullPeriods.length > 0 ? fullPeriods[fullPeriods.length - 1] : null;
-  const stubPeriod = p.periods.find((x) => x.isStub) ?? null;
+  const stubs = p.periods.filter((x) => x.isStub);
+  const stubPeriod = stubs.length > 0 ? stubs[stubs.length - 1] : null;
 
   // --- Growth -------------------------------------------------------------
   let revenueCagr: number | null = null;
@@ -107,6 +108,19 @@ export function analyse(p: ParsedProspectus, now: Date = new Date()): DerivedMet
     const prev = patSeries[patSeries.length - 2];
     const last = patSeries[patSeries.length - 1];
     patGrowthLatest = pctChange(prev.pat!, last.pat!);
+  }
+
+  // A REIT's reported profit is dominated by fair-value gains on its
+  // properties (pro forma PAT is more than twice revenue), so growth is
+  // measured on distributable income — the cash it can actually pay out.
+  if (p.reit) {
+    const di = p.periods
+      .map((per, i) => ({ per, v: p.reit?.distributableIncome[i] ?? null }))
+      .filter((x) => !x.per.isStub && x.v !== null && x.v > 0);
+    if (di.length >= 2) {
+      patCagr = cagr(di[0].v!, di[di.length - 1].v!, di.length - 1);
+      patGrowthLatest = pctChange(di[di.length - 2].v!, di[di.length - 1].v!);
+    }
   }
 
   // --- Margins ------------------------------------------------------------
@@ -289,6 +303,9 @@ export function analyse(p: ParsedProspectus, now: Date = new Date()): DerivedMet
  * 'missed' (keep visible) rather than hiding something that might be real.
  */
 function computeRelevance(p: ParsedProspectus): RelevanceProfile {
+  // A REIT earns rent: it has no order book and no customer-concentration table.
+  if (p.reit) return { orderBook: 'not_applicable', customerConcentration: 'not_applicable' };
+
   const text = `${p.businessDescription.value ?? ''} ${p.industry.value ?? ''}`.toLowerCase();
 
   // Businesses whose revenue is contract/project-based and therefore normally
@@ -588,5 +605,86 @@ function buildFlags(p: ParsedProspectus, m: DerivedMetrics): Flag[] {
     });
   }
 
-  return flags;
+  return p.reit ? adaptFlagsForReit(flags, p, m) : flags;
+}
+
+/**
+ * Re-bases the generic flags for a REIT. Measures that presuppose an operating
+ * company (current ratio, PE, "proceeds to growth") are marked not applicable;
+ * the rest keep their meaning with REIT-appropriate labels, and gearing and
+ * valuation are re-measured the way REITs are actually judged.
+ */
+function adaptFlagsForReit(flags: Flag[], p: ParsedProspectus, m: DerivedMetrics): Flag[] {
+  const reit = p.reit!;
+  const na = (f: Flag, why = NOT_APPLICABLE): Flag => ({
+    ...f,
+    applicability: 'not_applicable',
+    level: 'unknown',
+    display: 'n/a for a REIT',
+    rule: why,
+  });
+
+  return flags.map((f) => {
+    switch (f.id) {
+      case 'currentRatio':
+        return na(f);
+      case 'proceedsGrowth':
+        return na(f, 'The trust issues no new Units, so it receives no proceeds to deploy');
+      case 'gearing': {
+        const v = reit.gearingPct.value;
+        const cap = reit.gearingLimitPct.value;
+        return {
+          ...f,
+          label: 'Gearing (debt ÷ total assets)',
+          applicability: v !== null ? 'present' : 'missed',
+          display: v === null ? '—' : `${v.toFixed(1)}%${cap !== null ? ` of ${cap.toFixed(0)}% cap` : ''}`,
+          level: v === null ? 'unknown' : v >= 45 ? 'concern' : v >= 35 ? 'watch' : 'good',
+          rule:
+            v === null
+              ? UNKNOWN
+              : `Measured at listing. Concern at 45% or more, watch 35–45%, good below 35%${cap !== null ? ` (the regulatory ceiling is ${cap.toFixed(0)}%)` : ''}`,
+        };
+      }
+      case 'marginTrend':
+        return {
+          ...f,
+          label: 'NPI margin trend',
+          rule:
+            m.marginTrend === null
+              ? UNKNOWN
+              : 'Net property income ÷ revenue. Good if improving or stable; watch if compressing or volatile across reported periods',
+        };
+      case 'profitTrend':
+        return {
+          ...f,
+          label: 'Distributable income growth',
+          rule:
+            m.patGrowthLatest === null
+              ? UNKNOWN
+              : 'Latest full year vs the year before, on distributable income (reported profit is inflated by property revaluations). Watch if it fell',
+        };
+      case 'founderStake':
+        return { ...f, label: 'Sponsor retained stake' };
+      case 'boardIndependence':
+        return { ...f, label: 'Manager board independence' };
+      case 'valuation': {
+        const v = m.priceToBook;
+        return {
+          ...f,
+          id: 'valuation',
+          label: 'Price to NAV',
+          glossaryKey: 'priceToBook',
+          applicability: v !== null ? 'present' : 'missed',
+          display: v === null ? '—' : `${v.toFixed(2)}×`,
+          level: v === null ? 'unknown' : v <= 1 ? 'good' : v <= 1.3 ? 'watch' : 'concern',
+          rule:
+            v === null
+              ? UNKNOWN
+              : 'Retail price ÷ pro forma NAV per Unit. Good at or below 1.0×, watch 1.0–1.3×, concern above 1.3×. Compare with listed REIT peers',
+        };
+      }
+      default:
+        return f;
+    }
+  });
 }
